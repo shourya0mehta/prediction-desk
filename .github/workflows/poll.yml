@@ -3,6 +3,12 @@ name: poll
 # Every 30 minutes. GitHub cron drifts a few minutes under load; harmless here.
 # Public repo => unlimited free Actions minutes, which is what makes the
 # election-night high-frequency mode free as well.
+#
+# Two outputs per run:
+#   * the secret gist       -- internal state and config (token model unchanged)
+#   * a GitHub Pages mirror -- the READ path, because the analyst's scheduled-task
+#     sandbox cannot reach gist.githubusercontent.com at all, and its fallback
+#     route truncates large files mid-document.
 on:
   schedule:
     - cron: "*/30 * * * *"
@@ -19,6 +25,8 @@ concurrency:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 jobs:
   poll:
@@ -51,7 +59,24 @@ jobs:
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
           GIST_ID: ${{ secrets.GIST_ID }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-        run: python main.py ${{ steps.mode.outputs.flag }}
+          PAGES_PREFIX: ${{ secrets.PAGES_PREFIX }}
+        run: python main.py ${{ steps.mode.outputs.flag }} --emit-site ./site
+
+      # Fail loudly rather than deploying an empty site over a good one.
+      - name: Verify the mirror was built
+        env:
+          PAGES_PREFIX: ${{ secrets.PAGES_PREFIX }}
+        run: |
+          DIR="./site/d/${PAGES_PREFIX}"
+          test -s "$DIR/snapshot.json"   || { echo "::error::snapshot.json missing"; exit 1; }
+          test -s "$DIR/brief-pack.json" || { echo "::error::brief-pack.json missing"; exit 1; }
+          test -s ./site/robots.txt      || { echo "::error::robots.txt missing"; exit 1; }
+          echo "mirror files: $(find "$DIR" -type f | wc -l)"
+          echo "brief-pack:   $(wc -c < "$DIR/brief-pack.json") bytes"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./site
 
       # A failed job must still reach the phone -- spec 0.3, fail loud.
       - name: Report failure
@@ -61,4 +86,29 @@ jobs:
         run: |
           curl -fsS -H "Title: Prediction desk: poll job FAILED" -H "Priority: 5" \
             -d "The scheduled poll workflow failed. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            "https://ntfy.sh/${NTFY_TOPIC}" || true
+
+  deploy:
+    needs: poll
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    # Pages allows one deployment at a time; queue rather than cancel, so a
+    # 30-minute poll never discards a mirror it just built.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Report deploy failure
+        if: failure()
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          curl -fsS -H "Title: Prediction desk: Pages deploy FAILED" -H "Priority: 5" \
+            -d "The snapshot published to the gist but the Pages mirror did not deploy. The analyst reads the mirror, so its next brief will be stale." \
             "https://ntfy.sh/${NTFY_TOPIC}" || true

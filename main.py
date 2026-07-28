@@ -29,7 +29,7 @@ from decimal import Decimal
 import httpx
 
 from desk.core import alerts as alert_mod
-from desk.core import compare, snapshot as snap_mod
+from desk.core import compare, site as site_mod, snapshot as snap_mod
 from desk.core.books import D
 from desk.core.state import (
     Gist, GistError, in_quiet_hours, last_brief_boundary, load_state, median,
@@ -585,6 +585,24 @@ def run(args) -> int:
         engine.pipeline_alert(f"Could not publish snapshot to the gist: {e}")
         return 1
 
+    # The Pages mirror is the read path the cloud analyst can actually reach;
+    # the gist above is internal state. A mirror failure is loud but must not
+    # invalidate a poll that already published successfully.
+    if args.emit_site:
+        try:
+            pack = site_mod.build_brief_pack(snap)
+            files = site_mod.build(args.emit_site, os.environ.get("PAGES_PREFIX", ""),
+                                   snap, universe, locals().get("universe_stats"),
+                                   gist, pack)
+            log.info("site: %d files under d/%s (brief-pack %.0f KB)",
+                     len(files), os.environ.get("PAGES_PREFIX", "")[:6] + "...",
+                     len(json.dumps(pack)) / 1000)
+        except Exception as e:
+            errors.append(f"pages mirror: {type(e).__name__}: {e}")
+            engine.pipeline_alert(
+                f"Snapshot published, but the Pages mirror failed: {e}\n"
+                f"The analyst reads the mirror, so its next brief will be stale.")
+
     if errors:
         engine.pipeline_alert(
             f"Run finished with {len(errors)} error(s):\n" + "\n".join(errors[:6]),
@@ -668,6 +686,8 @@ def main() -> int:
     ap.add_argument("--election-night", action="store_true",
                     help="tighten move threshold and bypass quiet hours")
     ap.add_argument("--selftest", action="store_true", help="heartbeat check only")
+    ap.add_argument("--emit-site", metavar="DIR",
+                    help="also write the GitHub Pages mirror the cloud analyst reads")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 

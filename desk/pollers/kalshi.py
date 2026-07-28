@@ -58,31 +58,50 @@ class KalshiPoller:
 
     # --------------------------------------------------------------- markets
     def markets(self, tickers: Iterable[str]) -> dict[str, dict]:
-        """Fetch quotes for specific tickers, keyed by ticker.
+        """Fetch quotes for specific tickers, one request per ticker.
 
-        The batch ``tickers=`` filter is used when available; any ticker the
-        batch call fails to return is fetched individually so a single delisted
-        or renamed market cannot silently blank the whole watchlist.
+        ONE TICKER PER CALL, deliberately. The list-filter parameters on
+        ``/markets`` are a minefield, verified against the live API 2026-07-28:
+
+          * ``?ticker=<t>``  (SINGULAR) is **silently ignored**. It does not
+            error -- it returns an arbitrary page of unrelated markets. A live
+            analyst run asking for six political tickets this way got back a
+            page of esports markets and had no way to tell.
+          * ``?tickers=a,b`` (PLURAL) does filter correctly, but it silently
+            *drops* tickers it does not recognise: ask for a real one plus a
+            bogus one and you get a single row and no error, so a renamed or
+            delisted market disappears without a word.
+
+        Both failure modes are silent, and a silently wrong price is worse than
+        a missing one on a desk that trades off these numbers. The per-market
+        endpoint ``/markets/{ticker}`` cannot return the wrong instrument and
+        404s loudly when a ticker dies, so each ticker is fetched on its own and
+        anything missing is recorded as an explicit error.
+
+        The cost is ~11 requests instead of 1, about five seconds at the polite
+        rate. That is cheap insurance.
         """
         tickers = [t for t in tickers if t]
         if not tickers:
             return {}
 
         out: dict[str, dict] = {}
-        try:
-            data = self._get("/markets", {"tickers": ",".join(tickers), "limit": 1000})
-            for m in data.get("markets", []) or []:
-                out[m["ticker"]] = m
-        except KalshiError as e:
-            log.warning("batch /markets failed (%s); falling back per-ticker", e)
-
-        for t in tickers:
-            if t in out:
-                continue
+        for i, t in enumerate(tickers):
+            if i:
+                time.sleep(1.0 / REQUESTS_PER_SECOND)
             try:
-                out[t] = self._get(f"/markets/{t}")["market"]
+                m = self._get(f"/markets/{t}")["market"]
             except (KalshiError, KeyError) as e:
                 log.error("ticker %s unavailable: %s", t, e)
+                continue
+            got = m.get("ticker")
+            if got != t:
+                # Cannot happen on the per-market endpoint, but assert it: this
+                # is exactly the class of bug that made the analyst quote
+                # esports prices for a Senate race.
+                log.error("ticker mismatch: asked %s, got %s -- discarding", t, got)
+                continue
+            out[t] = m
         return out
 
     def orderbook(self, ticker: str, depth: int = 20) -> dict:

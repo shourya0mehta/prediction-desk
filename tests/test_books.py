@@ -633,3 +633,134 @@ def test_feed_alert_keeps_a_real_publisher_url():
         "keywords": ["endorse"],
     })
     assert a.links == ["https://www.fox6now.com/news/uaw"]
+
+
+# --------------------------------------- Kalshi: one ticker per call, always
+
+def test_markets_uses_the_per_market_endpoint_never_a_list_filter():
+    """?ticker= (singular) is silently ignored and returns unrelated markets.
+
+    A live analyst run asked for six political tickers that way and got a page
+    of esports back, with no error to notice. The plural ?tickers= does filter,
+    but silently DROPS unknown tickers. Both failures are silent, so the poller
+    uses /markets/{ticker}, which cannot return the wrong instrument.
+    """
+    from desk.pollers.kalshi import KalshiPoller
+    seen = []
+
+    class P(KalshiPoller):
+        def __init__(self):
+            pass
+        def _get(self, path, params=None):
+            seen.append((path, params))
+            tk = path.rsplit("/", 1)[-1]
+            return {"market": {"ticker": tk, "yes_bid_dollars": "0.50"}}
+
+    out = P().markets(["KXSENATEMID-26-AELS", "SENATEME-26-D"])
+    assert set(out) == {"KXSENATEMID-26-AELS", "SENATEME-26-D"}
+    assert all(p.startswith("/markets/") for p, _ in seen), seen
+    for _, params in seen:
+        assert not (params or {}).get("tickers"), "must not use the list filter"
+        assert not (params or {}).get("ticker"), "must not use the singular filter"
+
+
+def test_markets_discards_a_response_for_the_wrong_ticker():
+    """Belt and braces: never let a mismatched instrument into the snapshot."""
+    from desk.pollers.kalshi import KalshiPoller
+
+    class P(KalshiPoller):
+        def __init__(self):
+            pass
+        def _get(self, path, params=None):
+            return {"market": {"ticker": "KXMVESPORTS-SOMETHING", "yes_bid_dollars": "0.5"}}
+
+    assert P().markets(["SENATEME-26-D"]) == {}
+
+
+def test_markets_survives_one_dead_ticker():
+    from desk.pollers.kalshi import KalshiPoller, KalshiError
+
+    class P(KalshiPoller):
+        def __init__(self):
+            pass
+        def _get(self, path, params=None):
+            tk = path.rsplit("/", 1)[-1]
+            if tk == "DEAD":
+                raise KalshiError("HTTP 404")
+            return {"market": {"ticker": tk, "yes_bid_dollars": "0.5"}}
+
+    out = P().markets(["DEAD", "SENATEME-26-D"])
+    assert set(out) == {"SENATEME-26-D"}
+
+
+# ------------------------------------------------------ brief-pack contract
+
+def _snap(n_feeds=500):
+    return {
+        "generated_at": "2026-07-28T21:00:00+00:00",
+        "generated_at_pt": "2026-07-28 14:00:00 PDT",
+        "errors": [],
+        "markets": [{
+            "id": "mi-sen-dem-elsayed", "race_tag": "mi-sen-dem", "label": "MI-Sen",
+            "resolution_date": "2026-08-04", "clip_size": 169,
+            "venue_data": {"kalshi": {"bid": "0.74", "ask": "0.75", "mid": "0.745"}},
+            "executable": {"buy_clip_vwap": {"vwap": "0.75", "net": "0.762"},
+                           "sell_clip_vwap": {"vwap": "0.74", "net": "0.728"},
+                           "thin": False},
+            "volume_24h": "120811", "delta_since_last_poll": 0.0,
+            "delta_since_last_brief": -1.0,
+        }],
+        "positions": {"marked_pnl": [{"market_id": "x", "mark": "0.75"}],
+                      "pnl_price_basis": "kalshi_executable"},
+        "cross_venue": [], 
+        "whales": [{"alias": "Domer", "changes_24h": [{"kind": "entry", "title": "t"}]}],
+        "alerts_since_last_brief": [{"ts": "t", "trigger": "move", "title": "x"}],
+        "catalysts_next_14d": [{"date": "2026-08-04", "race_tag": "mi-sen-dem"}],
+        "feeds_36h": [{"source": "gnews-mi-sen-dem", "race_tag": "mi-sen-dem",
+                       "ts": "t", "title": "H" * 120, "keywords": ["poll"]}
+                      for _ in range(n_feeds)],
+    }
+
+
+def test_brief_pack_orders_sections_so_truncation_degrades_gracefully():
+    """The first cloud run truncated mid-snapshot and lost whales, PM and alerts.
+
+    The pack puts the sections a brief cannot be written without ahead of the
+    unbounded feed list, so a truncated read still yields a usable brief.
+    """
+    from desk.core.site import build_brief_pack
+    keys = list(build_brief_pack(_snap()).keys())
+    order = [k for k in keys if k in
+             ("scoreboard", "positions", "whales", "alerts_since_last_brief",
+              "catalysts_next_14d", "feeds_recent")]
+    assert order == ["scoreboard", "positions", "whales",
+                     "alerts_since_last_brief", "catalysts_next_14d", "feeds_recent"]
+
+
+def test_brief_pack_stays_under_the_size_budget_by_trimming_feeds_only():
+    import json
+    from desk.core.site import build_brief_pack, MAX_PACK_BYTES
+    pack = build_brief_pack(_snap(n_feeds=5000))
+    assert len(json.dumps(pack)) <= MAX_PACK_BYTES
+    # The high-value sections survive the trim intact.
+    assert len(pack["scoreboard"]) == 1
+    assert pack["whales"] and pack["alerts_since_last_brief"]
+    assert pack["catalysts_next_14d"]
+    assert len(pack["feeds_recent"]) < 5000
+    assert "5000 items" in pack["feeds_note"], "must say what was dropped"
+
+
+def test_brief_pack_marks_polymarket_as_non_executable():
+    from desk.core.site import build_brief_pack
+    s = _snap(n_feeds=1)
+    s["markets"][0]["venue_data"]["polymarket"] = {"bid": "0.63", "ask": "0.64", "mid": "0.635"}
+    row = build_brief_pack(s)["scoreboard"][0]
+    assert row["pm_intl_ref"]["executable"] is False
+
+
+def test_site_refuses_to_publish_without_a_prefix():
+    """A guessable path would put the ledger at a predictable URL."""
+    import pytest as _pytest
+    from desk.core import site
+    with _pytest.raises(ValueError):
+        site.build("/tmp/nope", "", {}, None, None, None, {})
