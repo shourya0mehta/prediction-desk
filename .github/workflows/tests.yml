@@ -34,7 +34,8 @@ jobs:
           # address, so the literal appears there and in docs on purpose; it must
           # never appear in a config file.
           if grep -rn "0x9c2dfba5885f5602b9339f8e4ee862ea8537350b" \
-               --include="*.yml" --include="*.yaml" --exclude-dir=.git . ; then
+               --include="*.yml" --include="*.yaml" \
+               --exclude=tests.yml --exclude-dir=.git . ; then
             echo "::error::the decoy wallet must never appear in config"; exit 1
           fi
           echo "clean"
