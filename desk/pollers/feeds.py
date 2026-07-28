@@ -158,6 +158,49 @@ def keyword_hits(text: str) -> list[str]:
     return [k for k in KEYWORDS if k in low]
 
 
+def readable_link(url: str | None) -> str | None:
+    """Drop links that are useless in a phone notification.
+
+    Google News RSS items link to news.google.com/rss/articles/<long base64
+    blob>, which redirects to the publisher. Pasted into an ntfy body it is an
+    unreadable wall of characters that tells you nothing about where the story
+    came from -- the headline itself is the useful payload, so these are dropped
+    and the title is carried instead.
+    """
+    if not url:
+        return None
+    if "news.google.com/rss/" in url:
+        return None
+    return url
+
+
+def publisher_of(title: str) -> str | None:
+    """Google News suffixes each headline with ' - Publisher'.
+
+    Recovering it gives the notification a source name even though the link
+    itself is discarded.
+    """
+    if not title or " - " not in title:
+        return None
+    tail = title.rsplit(" - ", 1)[-1].strip()
+    # Publisher names are short; a long tail is almost certainly headline prose.
+    return tail if 0 < len(tail) <= 40 else None
+
+
+def clean_headline(title: str) -> str:
+    """The headline without its trailing ' - Publisher'.
+
+    The publisher is shown on its own attribution line, so leaving the suffix in
+    would print it twice and eat characters in a notification that truncates.
+    """
+    if not title:
+        return ""
+    pub = publisher_of(title)
+    if pub and title.endswith(f" - {pub}"):
+        return title[: -len(f" - {pub}")].strip()
+    return title.strip()
+
+
 def collect(client: httpx.Client, feeds: list[dict], race_keywords: dict[str, list[str]],
             window_hours: int = WINDOW_HOURS) -> tuple[list[dict], list[str]]:
     """Fetch every configured feed, keep recent items, tag and dedupe by GUID."""

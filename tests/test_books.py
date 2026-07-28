@@ -296,14 +296,18 @@ def test_small_print_does_not_alert_just_for_beating_a_tiny_median():
     assert large_print_alert(mkt, tiny, median_notional=3.0, t=t) is None
 
 
-def test_relative_rule_still_fires_for_a_genuinely_outsized_print():
+def test_relative_rule_alone_no_longer_fires():
+    """Superseded 2026-07-28: the relative test is no longer sufficient on its own.
+
+    This used to assert that a $320 print at 16x the median should alert. In
+    production that class of print ($204, $240) reached the phone and was not
+    worth it, so a print must now clear the dollar bar as well.
+    """
     from desk.core.alerts import large_print_alert
-    t = {"large_print_notional": 500, "large_print_median_multiple": 5,
-         "large_print_median_floor": 100}
+    t = {"large_print_notional": 1000, "large_print_median_multiple": 10}
     mkt = {"id": "mo04", "label": "MO-04 Gray"}
     big = {"notional": "320", "count": "440", "yes_price": "0.73", "taker_side": "yes"}
-    # 320 is well under the $500 absolute floor but is 16x a $20 median.
-    assert large_print_alert(mkt, big, median_notional=20.0, t=t) is not None
+    assert large_print_alert(mkt, big, median_notional=20.0, t=t) is None
 
 
 def test_absolute_floor_alone_is_enough_with_no_history():
@@ -458,3 +462,174 @@ def test_fetch_feed_gives_up_after_repeated_429s():
     entries, err = F.fetch_feed(C(), "http://example/feed", retries=3)
     assert entries == [] and "429" in err
     assert calls["n"] == 3
+
+
+# ------------------------- gist write retry (409 from a concurrent writer)
+
+def _gist(client):
+    from desk.core.state import Gist
+    return Gist("gid", "tok", client=client)
+
+
+def test_gist_write_retries_409_then_succeeds(monkeypatch):
+    """GitHub 409s when the analyst appends a brief mid-publish.
+
+    Observed in production at 2:44 PM; without a retry the snapshot is silently
+    lost for that cycle.
+    """
+    import httpx
+    from desk.core import state as S
+    monkeypatch.setattr(S.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    class C:
+        def patch(self, url, headers=None, json=None):
+            calls["n"] += 1
+            req = httpx.Request("PATCH", url)
+            if calls["n"] < 3:
+                return httpx.Response(409, text="Gist cannot be updated", request=req)
+            return httpx.Response(200, json={"id": "gid"}, request=req)
+
+    _gist(C()).write({"snapshot.json": "{}"})
+    assert calls["n"] == 3
+
+
+def test_gist_write_retries_5xx(monkeypatch):
+    import httpx
+    from desk.core import state as S
+    monkeypatch.setattr(S.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    class C:
+        def patch(self, url, headers=None, json=None):
+            calls["n"] += 1
+            req = httpx.Request("PATCH", url)
+            code = 502 if calls["n"] == 1 else 200
+            return httpx.Response(code, json={"id": "gid"}, request=req)
+
+    _gist(C()).write({"snapshot.json": "{}"})
+    assert calls["n"] == 2
+
+
+def test_gist_write_raises_after_exhausting_retries(monkeypatch):
+    import httpx
+    import pytest as _pytest
+    from desk.core import state as S
+    monkeypatch.setattr(S.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    class C:
+        def patch(self, url, headers=None, json=None):
+            calls["n"] += 1
+            return httpx.Response(409, text="Gist cannot be updated",
+                                  request=httpx.Request("PATCH", url))
+
+    with _pytest.raises(S.GistError) as e:
+        _gist(C()).write({"snapshot.json": "{}"})
+    assert calls["n"] == 3
+    assert "409" in str(e.value)
+
+
+def test_gist_write_does_not_retry_a_real_failure(monkeypatch):
+    """401/404 are not transient; retrying just delays the alert."""
+    import httpx
+    import pytest as _pytest
+    from desk.core import state as S
+    monkeypatch.setattr(S.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    class C:
+        def patch(self, url, headers=None, json=None):
+            calls["n"] += 1
+            return httpx.Response(404, text="Not Found",
+                                  request=httpx.Request("PATCH", url))
+
+    with _pytest.raises(S.GistError):
+        _gist(C()).write({"snapshot.json": "{}"})
+    assert calls["n"] == 1, "a 404 must fail immediately"
+
+
+# ------------------------------------- large prints: BOTH bars, not either
+
+LP_T = {"large_print_notional": 1000, "large_print_median_multiple": 10}
+LP_MKT = {"id": "mi-sen", "label": "MI-Sen El-Sayed"}
+
+
+def _print(n):
+    return {"notional": str(n), "count": "100", "yes_price": "0.75", "taker_side": "yes"}
+
+
+def test_production_noise_prints_no_longer_page():
+    """$204 and $240 prints reached the phone under OR semantics."""
+    from desk.core.alerts import large_print_alert
+    assert large_print_alert(LP_MKT, _print(204), median_notional=15.0, t=LP_T) is None
+    assert large_print_alert(LP_MKT, _print(240), median_notional=20.0, t=LP_T) is None
+
+
+def test_big_notional_but_ordinary_for_this_market_is_suppressed():
+    """$1,200 in a market whose median print is $500 is just normal flow."""
+    from desk.core.alerts import large_print_alert
+    assert large_print_alert(LP_MKT, _print(1200), median_notional=500.0, t=LP_T) is None
+
+
+def test_relatively_huge_but_small_in_dollars_is_suppressed():
+    """80x the median still is not worth waking up for at $400."""
+    from desk.core.alerts import large_print_alert
+    assert large_print_alert(LP_MKT, _print(400), median_notional=5.0, t=LP_T) is None
+
+
+def test_print_clearing_both_bars_fires():
+    from desk.core.alerts import large_print_alert
+    a = large_print_alert(LP_MKT, _print(2500), median_notional=50.0, t=LP_T)
+    assert a is not None and a.trigger == "large_print"
+
+
+def test_election_night_halves_both_bars():
+    """A $600 print at 6x median is noise on a Tuesday, signal on election night."""
+    from desk.core.alerts import large_print_alert
+    night = {"large_print_notional": 500, "large_print_median_multiple": 5}
+    assert large_print_alert(LP_MKT, _print(600), median_notional=100.0, t=LP_T) is None
+    assert large_print_alert(LP_MKT, _print(600), median_notional=100.0, t=night) is not None
+
+
+# ------------------------------- news alerts carry headlines, not base64 URLs
+
+GNEWS = ("https://news.google.com/rss/articles/"
+         "CBMiZkFVX3lxTE5rZTRjaXJvaWJIUXNVU1lXbG9uZ2Jhc2U2NGJsb2I")
+
+
+def test_google_news_redirect_links_are_dropped():
+    from desk.pollers.feeds import readable_link
+    assert readable_link(GNEWS) is None
+    assert readable_link("https://www.bangordailynews.com/story") == \
+        "https://www.bangordailynews.com/story"
+    assert readable_link(None) is None
+
+
+def test_publisher_is_recovered_from_the_headline_suffix():
+    from desk.pollers.feeds import publisher_of
+    assert publisher_of("Harris backs Troy Jackson in Maine Senate race - The Hill") == "The Hill"
+    assert publisher_of("No suffix here") is None
+
+
+def test_feed_alert_body_carries_the_headline_and_no_base64_url():
+    from desk.core.alerts import feed_alert
+    a = feed_alert({
+        "race_tag": "me-sen",
+        "title": "Kamala Harris endorses Troy Jackson in Senate race - WGME",
+        "url": GNEWS, "source": "gnews-me-sen", "keywords": ["endorse"],
+    })
+    assert "Kamala Harris endorses Troy Jackson" in a.body
+    assert "WGME" in a.body
+    assert a.links == [], "the base64 Google News link must not reach the phone"
+    assert "news.google.com" not in a.body
+
+
+def test_feed_alert_keeps_a_real_publisher_url():
+    from desk.core.alerts import feed_alert
+    a = feed_alert({
+        "race_tag": "wi-gov-dem", "title": "UAW endorses Mandela Barnes - FOX6",
+        "url": "https://www.fox6now.com/news/uaw", "source": "gnews-wi-gov-dem",
+        "keywords": ["endorse"],
+    })
+    assert a.links == ["https://www.fox6now.com/news/uaw"]

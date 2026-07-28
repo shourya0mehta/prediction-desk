@@ -163,6 +163,15 @@ the ~1,800 with real 24h volume, which is 0.70 MB and greppable in one fetch.
 specific dormant market, query the Kalshi API directly rather than concluding it
 does not exist.
 
+**Gist writes can collide.** The analyst task appends its brief to the same
+gist the poll publishes into, and GitHub answers `409 Gist cannot be updated`
+when two writers overlap — seen in production at 2:44 PM. `Gist.write` retries
+three times with a 5–15s jittered backoff, which is long on purpose: two writers
+retrying in lockstep would just collide again. The two writers touch different
+filenames, so a PATCH merges cleanly and there is no clobbering risk — the 409 is
+lock contention, not a data conflict. If 409s start surviving all three attempts,
+that is the signal to move briefs into their own gist.
+
 **The cross-venue number is not an arbitrage.** You cannot trade the
 international book. It fires on movement away from that market's own 7-day median
 gap, because segregated books carry persistent structural spreads that would

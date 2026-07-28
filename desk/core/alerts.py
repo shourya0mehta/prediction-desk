@@ -219,20 +219,23 @@ def volume_alert(market: dict, spike: dict, t: dict) -> Alert | None:
 def large_print_alert(market: dict, print_row: dict, median_notional: float | None,
                       t: dict) -> Alert | None:
     notional = float(print_row.get("notional") or 0)
-    floor = float(t.get("large_print_notional", 500))
-    mult = float(t.get("large_print_median_multiple", 5))
-    # The relative test needs an absolute floor of its own. Spec 6 reads
-    # "$500 OR >=5x the trailing median", but taken literally that fires on a $15
-    # print in a market whose typical print is $3 -- observed during build-time
-    # testing across seven of the eleven markets. Five times almost nothing is
-    # still almost nothing; the signal the spec describes is "a $500 print in a
-    # $27k primary book".
-    rel_floor = float(t.get("large_print_median_floor", 100))
-    big = notional >= floor or (
-        median_notional and notional >= median_notional * mult and notional >= rel_floor
-    )
-    if not big:
+    floor = float(t.get("large_print_notional", 1000))
+    mult = float(t.get("large_print_median_multiple", 10))
+
+    # BOTH conditions, not either. Spec 6 reads "$500 OR >=5x the trailing
+    # median", but in production that paged for $204 and $240 prints: the OR let
+    # a modest print through on the relative test alone, and a low absolute floor
+    # let ordinary flow through on the other. Requiring both means a print has to
+    # be large in dollars AND unusual for that specific market before it is worth
+    # a notification. Election-night mode halves both (see main.py).
+    if notional < floor:
         return None
+    if median_notional:
+        if notional < median_notional * mult:
+            return None
+    # With no trailing history the relative test cannot be evaluated, so the
+    # absolute floor stands alone. This only happens on the first poll after a
+    # cold start, when alerts are suppressed anyway.
     label = market.get("label") or market.get("id")
     return Alert(
         market_id=market.get("id"), trigger="large_print",
@@ -280,12 +283,33 @@ def whale_alert(alias: str, wallet: str, changes: list, t: dict) -> Alert | None
 
 
 def feed_alert(item: dict) -> Alert:
+    """A news alert carries the headline, not the link.
+
+    Derived Google News items link to a base64 redirect on news.google.com that
+    is unreadable on a phone, so the body leads with the full headline and the
+    publisher recovered from it; a real publisher URL is attached when the feed
+    provides one.
+    """
+    from ..pollers.feeds import clean_headline, publisher_of, readable_link
+
+    raw = item.get("title") or ""
+    headline = clean_headline(raw)
+    pub = publisher_of(raw) or item.get("source") or "feed"
+    kws = ", ".join(item.get("keywords") or [])
+
+    # The ntfy title truncates, so the body repeats the headline in full.
+    body = headline
+    if pub:
+        body += f"\n-- {pub}"
+    if kws:
+        body += f"\nmatched: {kws}"
+
+    link = readable_link(item.get("url"))
     return Alert(
         market_id=item.get("race_tag") or "_feed", trigger="feed",
-        title=f"{item.get('race_tag') or 'News'}: {item.get('title','')[:80]}",
-        body=f"{item.get('source')} -- keywords: {', '.join(item.get('keywords') or [])}",
-        level="default", magnitude=1.0,
-        links=[item["url"]] if item.get("url") else [], tags=["newspaper"],
+        title=f"{item.get('race_tag') or 'News'}: {headline[:80]}",
+        body=body, level="default", magnitude=1.0,
+        links=[link] if link else [], tags=["newspaper"],
     )
 
 

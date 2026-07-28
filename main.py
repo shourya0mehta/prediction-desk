@@ -49,8 +49,8 @@ DEFAULT_THRESHOLDS = {
     "volume_spike_multiple": 3,
     "gap_dislocation_cents": 3,
     "whale_notional_change": 500,
-    "large_print_notional": 500,
-    "large_print_median_multiple": 5,
+    "large_print_notional": 1000,
+    "large_print_median_multiple": 10,
     "cooldown_minutes": 60,
     "quiet_hours_min_move_cents": 10,
     "stale_snapshot_minutes": 120,
@@ -151,8 +151,14 @@ def attach_context(feed_items: list, race_tag: str, within_hours: int = 2) -> tu
         except (KeyError, ValueError):
             continue
         if ts >= cutoff:
-            return (f"Possibly related: \"{item['title']}\" ({item['source']}).",
-                    [item["url"]] if item.get("url") else [])
+            # The headline itself is the payload. Google News links are base64
+            # redirect blobs that are unreadable in a notification, so they are
+            # dropped and the publisher name recovered from the title instead.
+            raw = item.get("title") or ""
+            attribution = feeds_mod.publisher_of(raw) or item.get("source") or "feed"
+            link = feeds_mod.readable_link(item.get("url"))
+            return (f"Possibly related: \"{feeds_mod.clean_headline(raw)}\" "
+                    f"({attribution}).", [link] if link else [])
     return ("No news attached -- unexplained move. Worth checking the race's X handles "
             "by hand; the pipeline cannot read them.", [])
 
@@ -178,6 +184,11 @@ def run(args) -> int:
         thresholds["single_poll_move_cents"] = thresholds.get("election_night_move_cents", 2)
         thresholds["single_poll_move_high_cents"] = max(
             4, int(thresholds["single_poll_move_cents"]) * 2)
+        # Halve both large-print bars: on a settlement night a $500 print that is
+        # 5x normal is worth knowing about, where on an ordinary Tuesday it is not.
+        thresholds["large_print_notional"] = float(thresholds["large_print_notional"]) / 2
+        thresholds["large_print_median_multiple"] = float(
+            thresholds["large_print_median_multiple"]) / 2
 
     state = load_state(gist)
     engine = alert_mod.AlertEngine(thresholds, state, topic, client=http,

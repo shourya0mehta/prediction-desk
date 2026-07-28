@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -19,6 +21,11 @@ import yaml
 log = logging.getLogger(__name__)
 
 GITHUB_API = "https://api.github.com"
+
+# Gist writes collide when the analyst task appends a brief while a poll is
+# publishing the snapshot; GitHub answers 409 "Gist cannot be updated".
+WRITE_ATTEMPTS = 3
+WRITE_BACKOFF_RANGE = (5.0, 15.0)   # seconds, jittered
 PT = ZoneInfo("America/Los_Angeles")
 ET = ZoneInfo("America/New_York")
 
@@ -84,15 +91,43 @@ class Gist:
         except json.JSONDecodeError as e:
             raise GistError(f"{name} is not valid JSON: {e}") from e
 
-    def write(self, files: dict[str, str]) -> None:
-        """Patch one or more files. GitHub replaces content wholesale."""
+    def write(self, files: dict[str, str], attempts: int = WRITE_ATTEMPTS) -> None:
+        """Patch one or more files. GitHub replaces content wholesale.
+
+        Retries 409 and 5xx with a jittered backoff. GitHub returns
+        409 "Gist cannot be updated" when another writer is patching the same
+        gist concurrently -- in practice the analyst task appending its brief
+        while a poll is publishing the snapshot. It is transient, and the cost
+        of not retrying is a silently missing snapshot, so it is worth waiting
+        out.
+
+        The backoff is deliberately long and jittered rather than fast: two
+        writers retrying in lockstep would just collide again.
+        """
         payload = {"files": {n: {"content": c} for n, c in files.items()}}
-        r = self.client.patch(f"{GITHUB_API}/gists/{self.gist_id}",
-                              headers=self.headers, json=payload)
-        if r.status_code not in (200, 201):
-            raise GistError(f"write gist: HTTP {r.status_code} {r.text[:300]}")
-        if self._cache is not None:
-            self._cache.update(files)
+        last = ""
+
+        for attempt in range(attempts):
+            r = self.client.patch(f"{GITHUB_API}/gists/{self.gist_id}",
+                                  headers=self.headers, json=payload)
+            if r.status_code in (200, 201):
+                if self._cache is not None:
+                    self._cache.update(files)
+                if attempt:
+                    log.info("gist write succeeded on attempt %d", attempt + 1)
+                return
+
+            last = f"HTTP {r.status_code} {r.text[:200]}"
+            retryable = r.status_code == 409 or 500 <= r.status_code < 600
+            if not retryable or attempt == attempts - 1:
+                break
+
+            wait = random.uniform(*WRITE_BACKOFF_RANGE)
+            log.warning("gist write %s (likely a concurrent writer); retrying in %.1fs "
+                        "[%d/%d]", last, wait, attempt + 1, attempts)
+            time.sleep(wait)
+
+        raise GistError(f"write gist after {attempts} attempt(s): {last}")
 
 
 # --------------------------------------------------------------------- time
