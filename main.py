@@ -582,7 +582,8 @@ def selftest(args) -> int:
     token, gist_id = os.environ.get("GIST_TOKEN", ""), os.environ.get("GIST_ID", "")
     topic = os.environ.get("NTFY_TOPIC", "")
     http = httpx.Client(timeout=30, follow_redirects=True)
-    problems = []
+    problems: list[str] = []   # broken: worth a push
+    degraded: list[str] = []   # working but reduced: logged, never pushed
 
     try:
         gist = Gist(gist_id, token, client=http)
@@ -596,9 +597,19 @@ def selftest(args) -> int:
                 problems.append("snapshot.json has no readable generated_at")
             elif age > limit:
                 problems.append(f"snapshot is {age:.0f} minutes old (limit {limit:.0f})")
-            if snap.get("errors"):
-                problems.append(f"last run recorded {len(snap['errors'])} error(s): "
-                                + "; ".join(map(str, snap["errors"][:3])))
+            # Not every recorded error is worth waking someone for. A blocked RSS
+            # feed degrades the brief's context; a dead market poller blinds the
+            # desk. Only the second kind is a heartbeat failure -- otherwise one
+            # publisher that refuses GitHub's IP range would page every morning
+            # at 08:05 forever, and the alert stops meaning anything.
+            hard, soft = [], []
+            for e in snap.get("errors") or []:
+                (soft if str(e).startswith("feed ") else hard).append(str(e))
+            if hard:
+                problems.append(f"last run had {len(hard)} market-data error(s): "
+                                + "; ".join(hard[:3]))
+            if soft:
+                degraded.extend(soft)
     except GistError as e:
         problems.append(f"gist unreachable: {e}")
 
@@ -612,14 +623,22 @@ def selftest(args) -> int:
     except pm_mod.PolymarketError as e:
         problems.append(f"polymarket gamma unreachable: {e}")
 
+    if degraded:
+        # Printed so it shows in the Actions log and in `--selftest` locally,
+        # but deliberately never pushed.
+        print("heartbeat DEGRADED (not pushed):\n" + "\n".join(f"- {d}" for d in degraded))
+
     if problems:
         engine = alert_mod.AlertEngine({}, {"alerts": {}}, topic, client=http,
                                        dry_run=args.dry_run)
-        engine.pipeline_alert("Heartbeat FAILED:\n" + "\n".join(f"- {p}" for p in problems))
+        body = "Heartbeat FAILED:\n" + "\n".join(f"- {p}" for p in problems)
+        if degraded:
+            body += "\n\nAlso degraded (not the cause):\n" + "\n".join(f"- {d}" for d in degraded)
+        engine.pipeline_alert(body)
         print("HEARTBEAT FAILED:\n" + "\n".join(problems), file=sys.stderr)
         return 1
 
-    print("heartbeat OK")
+    print("heartbeat OK" + (f" ({len(degraded)} degraded feed(s))" if degraded else ""))
     return 0
 
 

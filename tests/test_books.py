@@ -358,3 +358,22 @@ def test_generic_party_names_never_become_race_keywords():
     assert "Democratic party" not in m.get("mi-07", [])
     assert "MI-07" in m["mi-07"]
     assert "Abdul El-Sayed" in m["mi-sen-dem"]
+
+
+def test_heartbeat_separates_degraded_feeds_from_broken_market_data():
+    """A blocked RSS feed must not page anyone.
+
+    centerforpolitics.org returns 403 to GitHub's IP range but 200 elsewhere, so
+    the daily heartbeat would otherwise report FAILED every morning and the
+    signal would stop meaning anything.
+    """
+    errs = [
+        "feed crystal-ball: HTTPStatusError: Client error '403 Forbidden'",
+        "kalshi orderbook KXSENATEMID-26-AELS: HTTP 500",
+    ]
+    hard = [e for e in errs if not e.startswith("feed ")]
+    soft = [e for e in errs if e.startswith("feed ")]
+    assert len(soft) == 1 and len(hard) == 1
+    # A run whose only problem is feeds is healthy.
+    only_feeds = ["feed crystal-ball: 403", "feed zeteo: timeout"]
+    assert not [e for e in only_feeds if not e.startswith("feed ")]
