@@ -20,6 +20,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -458,23 +459,39 @@ def run(args) -> int:
     universe = None
     if args.universe:
         universe = []
+        universe_stats = {}
         try:
-            universe.extend(kal.open_political_markets(max_series=args.universe_max_series))
+            krows, kstats = kal.open_political_markets()
+            universe.extend(krows)
+            universe_stats["kalshi"] = kstats
         except kalshi_mod.KalshiError as e:
             errors.append(f"kalshi universe: {e}")
         try:
-            universe.extend(pm.open_political_markets())
+            prows, pstats = pm.open_political_markets()
+            universe.extend(prows)
+            universe_stats["polymarket_intl"] = pstats
         except pm_mod.PolymarketError as e:
             errors.append(f"polymarket universe: {e}")
+        log.info("universe: %s", universe_stats)
 
         known = set(state.get("seen_market_ids") or [])
-        tags = {r.get("race_tag") for r in active}
+        # Match new listings on the race's own distinctive keywords, with word
+        # boundaries. The obvious shortcut -- comparing the first segment of the
+        # race tag -- means "wi-gov-dem" matches the word "Will" and "mi-07"
+        # matches any title containing "mi". On a live 1,777-market sweep that
+        # produced 114 false listings, including a Peruvian presidency market
+        # filed under the Wisconsin governor's race.
+        kwmap = race_keyword_map(active)
         if known:
             for r in universe:
                 if r["id"] in known:
                     continue
                 blob = (r.get("title") or "").lower()
-                hit = next((t for t in tags if t and t.split("-")[0] in blob), None)
+                hit = None
+                for tag, words in kwmap.items():
+                    if any(re.search(rf"\b{re.escape(w.lower())}\b", blob) for w in words):
+                        hit = tag
+                        break
                 if hit and not args.selftest:
                     engine.emit(alert_mod.new_listing_alert(r, hit))
         state["seen_market_ids"] = [r["id"] for r in universe]
@@ -544,7 +561,7 @@ def run(args) -> int:
         return 0
 
     try:
-        snap_mod.publish(gist, snap, universe)
+        snap_mod.publish(gist, snap, universe, locals().get("universe_stats"))
         save_state(gist, state)
     except GistError as e:
         engine.pipeline_alert(f"Could not publish snapshot to the gist: {e}")
@@ -611,8 +628,6 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="run everything, print alerts instead of pushing, do not write the gist")
     ap.add_argument("--universe", action="store_true", help="also refresh universe.json")
-    ap.add_argument("--universe-max-series", type=int, default=None,
-                    help="cap Kalshi series walked during the universe sweep")
     ap.add_argument("--election-night", action="store_true",
                     help="tighten move threshold and bypass quiet hours")
     ap.add_argument("--selftest", action="store_true", help="heartbeat check only")

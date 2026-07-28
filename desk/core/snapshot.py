@@ -119,16 +119,21 @@ def catalysts_next_14d(watchlist: list, extra: list | None = None,
     return out
 
 
-def publish(gist, snap: dict, universe: list | None = None) -> None:
+def publish(gist, snap: dict, universe: list | None = None,
+            universe_stats: dict | None = None) -> None:
     files = {SNAPSHOT_FILE: json.dumps(snap, indent=1, sort_keys=False)}
     if universe is not None:
         files[UNIVERSE_FILE] = json.dumps({
             "generated_at": snap["generated_at"],
             "generated_at_pt": snap["generated_at_pt"],
             "count": len(universe),
+            "sweep_stats": universe_stats or {},
             "note": ("Polymarket rows are the INTERNATIONAL book (reference only). "
                      "Kalshi rows are executable. close_date is the venue's own field "
-                     "and is not a reliable resolution date on Kalshi political boards."),
+                     "and is NOT a reliable resolution date on Kalshi political boards. "
+                     "SCOPE: open political markets that traded in the last 24h. "
+                     "Markets with no 24h volume are excluded -- see sweep_stats for "
+                     "exactly how many, and the README for why."),
             "markets": universe,
         }, indent=1)
     gist.write(files)

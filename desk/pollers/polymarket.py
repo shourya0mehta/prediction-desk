@@ -78,14 +78,72 @@ class PolymarketPoller:
             out.extend(ev.get("markets", []) or [])
         return out
 
-    def open_political_markets(self, tag_slug: str = "politics", limit: int = 500) -> list[dict]:
-        """Universe sweep over Gamma. Filters out the phantom rows described
-        below before they reach the analyst."""
-        rows = self._get(f"{GAMMA}/markets", {
-            "closed": "false", "active": "true", "limit": limit,
-            "order": "volume24hr", "ascending": "false", "tag": tag_slug,
-        })
-        return [summarise_for_universe(m) for m in (rows or []) if is_real_market(m)]
+    def open_political_markets(self, max_pages: int = 20, page_size: int = 100,
+                               min_volume_24h: float = 1.0) -> tuple[list[dict], dict]:
+        """Universe sweep over Gamma, ordered by 24h volume.
+
+        Two things about this endpoint had to be discovered by testing rather
+        than read off the docs: it caps responses at **100 rows whatever
+        ``limit`` says**, so it must be paginated with ``offset``; and the
+        ``tag``/``tag_id`` filter is silently ignored, so political filtering
+        happens client-side on the title. Deep offsets 422 rather than returning
+        an empty page, which is treated as exhaustion.
+
+        Returns ``(rows, stats)``. Sorted by volume descending and stopped once
+        rows fall below ``min_volume_24h``, because past that point the tail is
+        dormant markets rather than opportunities.
+        """
+        rows: list[dict] = []
+        seen = pages = 0
+        exhausted = False
+
+        for page in range(max_pages):
+            try:
+                batch = self._get(f"{GAMMA}/markets", {
+                    "closed": "false", "active": "true",
+                    "limit": page_size, "offset": page * page_size,
+                    "order": "volume24hr", "ascending": "false",
+                })
+            except PolymarketError as e:
+                # Gamma rejects deep offsets with a 422 rather than an empty
+                # page (measured: fine at offset 2000, 422 by 5000). That is the
+                # end of the result set, not a failure worth alerting on.
+                if "422" in str(e):
+                    exhausted = True
+                    break
+                raise
+            if not batch:
+                exhausted = True
+                break
+            pages += 1
+            below = 0
+            for m in batch:
+                seen += 1
+                if not is_real_market(m):
+                    continue
+                vol = float(D(m.get("volume24hr")))
+                if vol < min_volume_24h:
+                    below += 1
+                    continue
+                if not is_political(m.get("question") or ""):
+                    continue
+                rows.append(summarise_for_universe(m))
+            # Ordered by volume descending, so a full page under the floor means
+            # everything after it is too.
+            if below == len(batch):
+                exhausted = True
+                break
+
+        stats = {
+            "pages_fetched": pages,
+            "markets_seen": seen,
+            "markets_kept": len(rows),
+            "reached_volume_floor": exhausted,
+            "truncated_by_page_cap": not exhausted and pages >= max_pages,
+        }
+        if stats["truncated_by_page_cap"]:
+            log.warning("polymarket universe hit the %d-page cap; results are partial", max_pages)
+        return rows, stats
 
     # ------------------------------------------------------------------ clob
     def book(self, token_id: str) -> dict:
