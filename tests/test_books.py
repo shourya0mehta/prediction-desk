@@ -276,3 +276,85 @@ def test_round_trip_breakeven_is_strictly_higher_than_settlement():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------- alert-layer regressions
+# These three all reproduce bugs found by running the real pipeline against live
+# data during the build, not hypotheticals.
+
+def test_small_print_does_not_alert_just_for_beating_a_tiny_median():
+    """A $15 print in a market whose typical print is $3 is not signal.
+
+    Spec 6 reads "$500 OR >=5x the trailing median". Taken literally that fired
+    on $15, $17 and $21 prints across seven markets on a live run.
+    """
+    from desk.core.alerts import large_print_alert
+    t = {"large_print_notional": 500, "large_print_median_multiple": 5,
+         "large_print_median_floor": 100}
+    mkt = {"id": "mo01", "label": "MO-01 Bush"}
+    tiny = {"notional": "15", "count": "50", "yes_price": "0.30", "taker_side": "yes"}
+    assert large_print_alert(mkt, tiny, median_notional=3.0, t=t) is None
+
+
+def test_relative_rule_still_fires_for_a_genuinely_outsized_print():
+    from desk.core.alerts import large_print_alert
+    t = {"large_print_notional": 500, "large_print_median_multiple": 5,
+         "large_print_median_floor": 100}
+    mkt = {"id": "mo04", "label": "MO-04 Gray"}
+    big = {"notional": "320", "count": "440", "yes_price": "0.73", "taker_side": "yes"}
+    # 320 is well under the $500 absolute floor but is 16x a $20 median.
+    assert large_print_alert(mkt, big, median_notional=20.0, t=t) is not None
+
+
+def test_absolute_floor_alone_is_enough_with_no_history():
+    from desk.core.alerts import large_print_alert
+    t = {"large_print_notional": 500, "large_print_median_multiple": 5,
+         "large_print_median_floor": 100}
+    mkt = {"id": "mi-sen", "label": "MI-Sen El-Sayed"}
+    big = {"notional": "1900", "count": "2500", "yes_price": "0.75", "taker_side": "no"}
+    assert large_print_alert(mkt, big, median_notional=None, t=t) is not None
+
+
+def test_whale_alert_ignores_non_watchlist_races():
+    """Tracked wallets hold dozens of 2028 presidential positions.
+
+    Those belong in the snapshot for the analyst, not on the phone under a
+    heading that claims a tracked race.
+    """
+    from desk.core.alerts import whale_alert
+    t = {"whale_notional_change": 500}
+    offwatch = [{"kind": "entry", "title": "Will JD Vance win the 2028 ...",
+                 "value_change": 30000, "on_watchlist": False}]
+    assert whale_alert("risk-manager", "0xabc", offwatch, t) is None
+
+    onwatch = [{"kind": "entry", "title": "Will John James win the MI GOP primary",
+                "value_change": 900, "on_watchlist": True}]
+    assert whale_alert("Domer", "0xabc", onwatch, t) is not None
+
+
+def test_watchlist_dates_are_flattened_to_strings_for_json():
+    """PyYAML turns an unquoted date into datetime.date, which json.dumps refuses.
+
+    This broke publishing the snapshot on every run until it was caught.
+    """
+    import datetime as dt
+    import json as _json
+    from main import normalise_watchlist
+    rows = normalise_watchlist([{"id": "x", "resolution_date": dt.date(2026, 8, 4)}])
+    assert rows[0]["resolution_date"] == "2026-08-04"
+    _json.dumps(rows)  # must not raise
+
+
+def test_generic_party_names_never_become_race_keywords():
+    """"Democratic party" is MI-07's candidate label on the party market.
+
+    Matching it tagged an unrelated Roland Martin video as MI-07 news.
+    """
+    from main import race_keyword_map
+    m = race_keyword_map([
+        {"race_tag": "mi-07", "candidate": "Democratic party", "keywords": ["MI-07"]},
+        {"race_tag": "mi-sen-dem", "candidate": "Abdul El-Sayed", "keywords": ["El-Sayed"]},
+    ])
+    assert "Democratic party" not in m.get("mi-07", [])
+    assert "MI-07" in m["mi-07"]
+    assert "Abdul El-Sayed" in m["mi-sen-dem"]

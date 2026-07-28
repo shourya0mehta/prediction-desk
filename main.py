@@ -328,15 +328,31 @@ def run(args) -> int:
                     engine.emit(a)
 
             # Large prints, against this market's own trailing 24h median.
+            # Deduped by trade_id: the public tape returns the same last-100
+            # trades every poll, so without this a single big print re-alerts
+            # every time the cooldown lapses for as long as it stays in the
+            # window.
             hist = trim_history(state.setdefault("print_history", {}).get(mid_id, []), 24)
             med = median([n for _, n in hist])
-            for p in ((kblock or {}).get("recent_prints") or [])[:10]:
+            seen_trades = set(state.setdefault("seen_trade_ids", {}).get(mid_id, []))
+            fresh_ids = []
+            fired = False
+            for p in ((kblock or {}).get("recent_prints") or [])[:25]:
+                tid = p.get("trade_id")
+                if not tid or tid in seen_trades:
+                    continue
+                fresh_ids.append(tid)
                 hist.append([p["ts"], float(p["notional"])])
+                if fired:
+                    continue
                 a = alert_mod.large_print_alert(alert_view, p, med, thresholds)
                 if a:
                     engine.emit(a)
-                    break  # one print alert per market per poll is enough
+                    fired = True  # one print alert per market per poll is enough
             state["print_history"][mid_id] = trim_history(hist, 24)
+            # Keep the most recent 400 ids per market: comfortably more than the
+            # 100-trade window the API returns, without growing without bound.
+            state["seen_trade_ids"][mid_id] = (fresh_ids + list(seen_trades))[:400]
 
         # Cross-venue divergence
         gap = compare.cross_venue_gap(kblock, pblock)
@@ -408,10 +424,21 @@ def run(args) -> int:
                 engine.emit(a)
 
     # ---- feed alerts ----------------------------------------------------
+    # Deduped by item URL across runs. Items stay in the 36h window by design
+    # (the analyst needs them in the snapshot), so without this the same
+    # headline would re-alert on every poll for a day and a half.
     if not args.selftest:
+        seen_feed = set(state.setdefault("seen_feed_guids", []))
+        new_guids = []
         for item in feed_items:
-            if item.get("keywords") and item.get("race_tag"):
-                engine.emit(alert_mod.feed_alert(item))
+            guid = item.get("url") or item.get("title")
+            if not guid:
+                continue
+            if guid not in seen_feed:
+                new_guids.append(guid)
+                if item.get("keywords") and item.get("race_tag"):
+                    engine.emit(alert_mod.feed_alert(item))
+        state["seen_feed_guids"] = (new_guids + list(seen_feed))[:1000]
 
     # ---- positions ------------------------------------------------------
     by_id = {m["id"]: m for m in markets_out}

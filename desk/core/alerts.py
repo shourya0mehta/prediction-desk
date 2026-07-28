@@ -221,7 +221,16 @@ def large_print_alert(market: dict, print_row: dict, median_notional: float | No
     notional = float(print_row.get("notional") or 0)
     floor = float(t.get("large_print_notional", 500))
     mult = float(t.get("large_print_median_multiple", 5))
-    big = notional >= floor or (median_notional and notional >= median_notional * mult)
+    # The relative test needs an absolute floor of its own. Spec 6 reads
+    # "$500 OR >=5x the trailing median", but taken literally that fires on a $15
+    # print in a market whose typical print is $3 -- observed during build-time
+    # testing across seven of the eleven markets. Five times almost nothing is
+    # still almost nothing; the signal the spec describes is "a $500 print in a
+    # $27k primary book".
+    rel_floor = float(t.get("large_print_median_floor", 100))
+    big = notional >= floor or (
+        median_notional and notional >= median_notional * mult and notional >= rel_floor
+    )
     if not big:
         return None
     label = market.get("label") or market.get("id")

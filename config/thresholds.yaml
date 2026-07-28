@@ -15,6 +15,8 @@ cumulative_move_cents: 7          # measured against the last 07:30/17:30 PT bas
 volume_spike_multiple: 3          # interval volume vs the 24h per-interval baseline
 large_print_notional: 500         # dollars; a $500 print in a $27k primary book is signal
 large_print_median_multiple: 5    # or 5x this market's own trailing 24h median print
+large_print_median_floor: 100     # ...but the relative test still needs an absolute floor:
+                                  # 5x a $3 median is $15, which is not signal
 
 # --- cross-venue divergence
 # NOT an arbitrage. The owner cannot trade the international Polymarket book, and
