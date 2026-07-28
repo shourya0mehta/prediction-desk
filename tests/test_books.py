@@ -377,3 +377,84 @@ def test_heartbeat_separates_degraded_feeds_from_broken_market_data():
     # A run whose only problem is feeds is healthy.
     only_feeds = ["feed crystal-ball: 403", "feed zeteo: timeout"]
     assert not [e for e in only_feeds if not e.startswith("feed ")]
+
+
+# ------------------------------------------------- derived Google News feeds
+
+def test_google_news_url_quotes_each_candidate_as_a_phrase():
+    """Unquoted names match loosely: a bare Nate Powell also matches any Powell."""
+    from urllib.parse import parse_qs, urlparse
+    from desk.pollers.feeds import google_news_url
+    u = google_news_url(["Abdul El-Sayed", "Haley Stevens"])
+    q = parse_qs(urlparse(u).query)
+    assert q["q"][0] == '"Abdul El-Sayed" OR "Haley Stevens"'
+    assert q["hl"] == ["en-US"] and q["gl"] == ["US"] and q["ceid"] == ["US:en"]
+    assert urlparse(u).netloc == "news.google.com"
+
+
+def test_google_news_url_is_none_without_candidates():
+    from desk.pollers.feeds import google_news_url
+    assert google_news_url([]) is None
+    assert google_news_url(None) is None
+    assert google_news_url(["  "]) is None
+
+
+def test_derive_feeds_one_per_active_race_pretagged():
+    from desk.pollers.feeds import derive_feeds
+    feeds = derive_feeds([
+        {"race_tag": "mi-sen-dem", "candidates": ["Abdul El-Sayed"], "active": True},
+        {"race_tag": "wa-05", "candidates": ["Nate Powell"], "active": True},
+        {"race_tag": "retired", "candidates": ["Someone"], "active": False},
+        {"race_tag": "no-names", "candidates": [], "active": True},
+    ])
+    assert [f["race_tag"] for f in feeds] == ["mi-sen-dem", "wa-05"]
+    assert all(f["derived"] and f["tier"] == "core" for f in feeds)
+    assert feeds[0]["source"] == "gnews-mi-sen-dem"
+
+
+def test_derived_feed_tag_is_a_fallback_and_never_overrides_keywords():
+    """Keyword tagging is unchanged; the feed's own tag only fills the gap."""
+    from desk.pollers.feeds import tag_for
+    kw = {"mi-sen-dem": ["El-Sayed"], "wa-05": ["Conroy"]}
+    # Keyword wins when present.
+    assert tag_for("Conroy leads the WA field", kw) == "wa-05"
+    # Nothing matches -> caller falls back to the feed's race_tag.
+    assert tag_for("A story naming nobody", kw) is None
+
+
+def test_fetch_feed_backs_off_on_429_then_succeeds():
+    """A 429 must be retried, not recorded as a dead feed."""
+    import httpx
+    from desk.pollers import feeds as F
+    calls = {"n": 0}
+    rss = (b'<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>'
+           b'<item><title>hello</title><link>http://x/1</link></item></channel></rss>')
+
+    class C:
+        def get(self, url, headers=None):
+            calls["n"] += 1
+            req = httpx.Request("GET", url)
+            if calls["n"] == 1:
+                return httpx.Response(429, headers={"Retry-After": "0"}, request=req)
+            return httpx.Response(200, content=rss, request=req)
+
+    entries, err = F.fetch_feed(C(), "http://example/feed")
+    assert err is None
+    assert calls["n"] == 2, "should have retried once after the 429"
+    assert len(entries) == 1
+
+
+def test_fetch_feed_gives_up_after_repeated_429s():
+    import httpx
+    from desk.pollers import feeds as F
+    calls = {"n": 0}
+
+    class C:
+        def get(self, url, headers=None):
+            calls["n"] += 1
+            return httpx.Response(429, headers={"Retry-After": "0"},
+                                  request=httpx.Request("GET", url))
+
+    entries, err = F.fetch_feed(C(), "http://example/feed", retries=3)
+    assert entries == [] and "429" in err
+    assert calls["n"] == 3

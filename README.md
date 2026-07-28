@@ -60,10 +60,15 @@ is a JSON file in the gist.
    - `GIST_ID` — the secret gist's ID.
    - `NTFY_TOPIC` — an unguessable string, e.g. `desk-<random12>`.
 2. **Phone.** Install ntfy, subscribe to that topic.
-3. **Google Alerts.** Follow `GOOGLE-ALERTS.md` in the gist; paste each RSS URL
-   into `feeds.yaml`.
-4. **Analyst tasks.** Two scheduled tasks (07:30 and 17:30 PT) using
+3. **Analyst tasks.** Two scheduled tasks (07:30 and 17:30 PT) using
    `analyst-task-prompt.md` with the gist raw URLs filled in.
+
+**News coverage needs no setup.** Each active race in `watchlist.yaml` carries a
+`candidates` list, and the pipeline derives one Google News RSS search per race
+from it — the names OR'd as quoted phrases — merged with the static feeds in
+`feeds.yaml`. `GOOGLE-ALERTS.md` in the gist is now an **optional extra**: the
+derived feeds cover the same ground automatically, so only add Google Alerts if
+you want a second, differently-ranked source for a specific candidate.
 
 Nothing needs redeploying when you edit the gist — the next poll picks it up.
 
@@ -89,6 +94,14 @@ writes nothing to the gist. Other flags: `--universe` (also refresh
 Add one block to `watchlist.yaml` and a `primer-<race_tag>.md` stub. The analyst
 writes the primer on its next run and flags it for approval. `resolution_date` is
 required — see the warning below.
+
+**News feeds are automatic.** Fill the block's `candidates` list and the race
+gets its own Google News feed on the next poll, pre-tagged with the race tag —
+there is nothing to click and no Google Alert to create. Include the main
+rivals, not just our candidate: news about the opponent moves the price just as
+much. Prefer distinctive names — the WA-09 incumbent is Adam Smith, and
+including him returned stories about the economist and a UK footballer, so he is
+deliberately left out of that race's list.
 
 ### Update the ledger (either venue)
 Send one line:

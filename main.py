@@ -216,7 +216,14 @@ def run(args) -> int:
     # ---- feeds ----------------------------------------------------------
     feed_items: list[dict] = []
     if not args.selftest:
-        feed_items, feed_errors = feeds_mod.collect(http, feeds_cfg, race_keyword_map(watchlist))
+        # Static feeds from the gist, plus one Google News feed derived per race
+        # from that race's `candidates` list. The derived feeds replace the
+        # manual Google Alerts setup, so adding a race brings its news coverage
+        # with it and there is nothing to click.
+        derived = feeds_mod.derive_feeds(active)
+        all_feeds = list(feeds_cfg) + derived
+        log.info("feeds: %d static + %d derived", len(feeds_cfg), len(derived))
+        feed_items, feed_errors = feeds_mod.collect(http, all_feeds, race_keyword_map(watchlist))
         errors.extend(feed_errors)
 
     # ---- markets --------------------------------------------------------
