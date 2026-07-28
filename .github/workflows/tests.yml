@@ -24,10 +24,9 @@ jobs:
       # scan, since it necessarily contains the patterns it searches for.
       - name: Assert no trading credentials anywhere
         run: |
-          SELF=".github/workflows/tests.yml"
           if grep -rniE "kalshi[_-]?(api[_-]?)?(key|secret)|private[_-]?key|KALSHI_ACCESS|mnemonic|seed[_-]?phrase" \
                --include="*.py" --include="*.yml" --include="*.yaml" --include="*.md" \
-               --exclude-dir=.git . | grep -v "^\./$SELF:" ; then
+               --exclude=tests.yml --exclude-dir=.git . ; then
             echo "::error::a trading-credential reference appeared in the repo"; exit 1
           fi
           # The decoy wallet is an empty international shell that must never be
