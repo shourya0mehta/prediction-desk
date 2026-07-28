@@ -202,6 +202,9 @@ def build_brief_pack(snapshot: dict, max_bytes: int = MAX_PACK_BYTES) -> dict:
         "positions": {
             "marked": (snapshot.get("positions") or {}).get("marked_pnl") or [],
             "pnl_price_basis": (snapshot.get("positions") or {}).get("pnl_price_basis"),
+            # Positions the pipeline cannot price. Kept beside the marked book so
+            # the analyst cannot write an exposure dashboard without seeing them.
+            "orphans": (snapshot.get("positions") or {}).get("orphans") or [],
         },
         "cross_venue": snapshot.get("cross_venue") or [],
         "whales": [

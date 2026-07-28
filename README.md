@@ -90,7 +90,23 @@ writes nothing to the gist. Other flags: `--universe` (also refresh
 
 ## Ops runbook
 
-### Add a race
+### Add a race — from your phone
+GitHub app → Actions → **add-race** → Run workflow. Paste a Kalshi ticker or a
+kalshi.com URL (market, event or series all work) and it writes the watchlist
+block, derives the `candidates` list from the sibling markets, creates the primer
+stub, updates the primer index and pushes an ntfy confirmation. Optional inputs:
+`resolution_date`, a Polymarket condition id, and `clip_size`. Tick `dry_run` to
+see what it would do first.
+
+**It will not invent a resolution date.** Kalshi's `close_time` is a placeholder
+on these boards, so without `resolution_date` the race is staged `active: false`
+— present and inspectable, but kept out of the alert path rather than given a
+countdown to a made-up date. The confirmation says so.
+
+If you gave an event or series rather than a market, it tracks the **favourite**
+and says which one it picked, so a wrong guess is one edit away.
+
+### Add a race — by hand
 Add one block to `watchlist.yaml` and a `primer-<race_tag>.md` stub. The analyst
 writes the primer on its next run and flags it for approval. `resolution_date` is
 required — see the warning below.
@@ -179,6 +195,11 @@ from the same runner got 200 — rate limiting, not an IP block. Fetches are now
 spaced 3.5–6s when consecutive requests hit the same host, and 429/503 back off
 8/20/35s. Election-night mode skips the derived news feeds entirely: they need
 ~60s of spacing and the poll interval is 150s.
+
+**A position with no watchlist entry is carried, not dropped.** Every run checks
+the ledger against the watchlist; anything untracked lands in
+`positions.orphans` with a data-quality error, and the analyst is told to
+research it from its `market_title`. Fix one with the add-race workflow.
 
 **Gist writes can collide.** The analyst task appends its brief to the same
 gist the poll publishes into, and GitHub answers `409 Gist cannot be updated`

@@ -468,6 +468,17 @@ def run(args) -> int:
     by_id = {m["id"]: m for m in markets_out}
     marked, basis = compare.mark_positions(ledger, by_id)
 
+    # A ledger row whose race is not on the watchlist is a real position the
+    # pipeline is blind to. Carry it anyway and flag it loudly -- an exposure
+    # dashboard that quietly omits money at risk is worse than no dashboard.
+    orphans = compare.orphan_positions(ledger, watchlist)
+    if orphans:
+        errors.append(
+            f"data-quality: {len(orphans)} ledger position(s) have no watchlist entry "
+            f"({', '.join(o['market_id'] or o['race_tag'] or '?' for o in orphans)}); "
+            f"carried in the snapshot but unpriced")
+        log.warning("orphan positions: %s", [o["market_id"] for o in orphans])
+
     # ---- catalysts ------------------------------------------------------
     catalysts = snap_mod.catalysts_next_14d(watchlist)
     if not args.selftest:
@@ -532,6 +543,7 @@ def run(args) -> int:
     snap = snap_mod.build(
         markets=markets_out,
         positions={"ledger": ledger, "marked_pnl": marked, "pnl_price_basis": basis,
+                   "orphans": orphans,
                    "clusters": ledger_doc.get("clusters") if isinstance(ledger_doc, dict) else None,
                    "bankroll": (ledger_doc.get("bankroll_snapshot_2026_07_28")
                                 if isinstance(ledger_doc, dict) else None)},

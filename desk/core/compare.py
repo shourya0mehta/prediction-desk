@@ -82,6 +82,46 @@ def delta_cents(current, previous) -> float | None:
     return float(((D(current) - D(previous)) * 100).quantize(Decimal("0.01")))
 
 
+def orphan_positions(ledger: list, watchlist: list) -> list[dict]:
+    """Ledger rows whose race has no watchlist entry.
+
+    An orphan is a real position the pipeline is blind to: no quote, no book, no
+    executable price, no news feed, no catalyst countdown. Silently dropping it
+    from the brief is the worst outcome, because the analyst would produce a
+    confident-looking exposure dashboard that is missing money the owner
+    actually has at risk.
+
+    So the position is still carried in the snapshot (marked to nothing), and
+    this list tells the analyst exactly which rows to research from the ledger's
+    own ``market_title`` instead of from market data.
+    """
+    tracked_tags = {r.get("race_tag") for r in watchlist or [] if r.get("race_tag")}
+    tracked_ids = {r.get("id") for r in watchlist or [] if r.get("id")}
+
+    out = []
+    for pos in ledger or []:
+        tag, mid_ = pos.get("race_tag"), pos.get("market_id")
+        if (tag and tag in tracked_tags) or (mid_ and mid_ in tracked_ids):
+            continue
+        out.append({
+            "market_id": mid_,
+            "race_tag": tag,
+            "market_title": pos.get("market_title"),
+            "venue": pos.get("venue"),
+            "side": pos.get("side"),
+            "shares": str(D(pos.get("shares"))),
+            "avg_price_cents": pos.get("avg_price_cents"),
+            "resolution_date": pos.get("resolution_date"),
+            "why": ("no watchlist entry for this race, so the pipeline has no quote, "
+                    "no executable price, no news feed and no catalyst countdown "
+                    "for it"),
+            "what_to_do": ("research this position from its market_title and the "
+                           "ledger's thesis; add a watchlist block via the add-race "
+                           "workflow to bring it back into the pipeline"),
+        })
+    return out
+
+
 def mark_positions(ledger: list, markets_by_id: dict) -> tuple[list, str]:
     """Mark the ledger to market and state the price basis honestly.
 

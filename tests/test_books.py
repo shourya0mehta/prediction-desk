@@ -803,3 +803,161 @@ def test_missing_universe_does_not_crash_the_mirror():
     with tempfile.TemporaryDirectory() as tmp:
         site.build(tmp, "abc123", {"generated_at_pt": "x"}, None, None, FakeGist(), {})
         assert (Path(tmp) / "d/abc123/snapshot.json").exists()
+
+
+# ------------------------------------------- orphan positions (ledger guard)
+
+def test_ledger_row_with_no_watchlist_entry_is_flagged_as_an_orphan():
+    """An untracked position is money at risk the pipeline cannot see.
+
+    Dropping it from the brief would produce a confident exposure dashboard that
+    silently understates the book.
+    """
+    from desk.core.compare import orphan_positions
+    ledger = [
+        {"market_id": "mi-sen-dem-elsayed", "race_tag": "mi-sen-dem", "shares": 169},
+        {"market_id": "nj-gov-dem-sherrill", "race_tag": "nj-gov-dem", "shares": 50,
+         "market_title": "New Jersey Democratic Governor nominee?", "venue": "kalshi",
+         "side": "YES", "avg_price_cents": 61.0},
+    ]
+    watchlist = [{"id": "mi-sen-dem-elsayed", "race_tag": "mi-sen-dem"}]
+    orphans = orphan_positions(ledger, watchlist)
+    assert [o["market_id"] for o in orphans] == ["nj-gov-dem-sherrill"]
+    o = orphans[0]
+    # The analyst needs the title, because that is all it has to research from.
+    assert o["market_title"] == "New Jersey Democratic Governor nominee?"
+    assert o["shares"] == "50"
+    assert "market_title" in o["what_to_do"]
+
+
+def test_no_orphans_when_every_position_is_tracked():
+    from desk.core.compare import orphan_positions
+    ledger = [{"market_id": "a", "race_tag": "r1"}, {"market_id": "b", "race_tag": "r2"}]
+    watchlist = [{"id": "a", "race_tag": "r1"}, {"id": "b", "race_tag": "r2"}]
+    assert orphan_positions(ledger, watchlist) == []
+
+
+def test_orphan_matched_by_market_id_even_if_race_tag_differs():
+    from desk.core.compare import orphan_positions
+    ledger = [{"market_id": "a", "race_tag": "renamed-tag"}]
+    watchlist = [{"id": "a", "race_tag": "original-tag"}]
+    assert orphan_positions(ledger, watchlist) == []
+
+
+def test_orphan_position_is_still_carried_in_marked_pnl():
+    """Flagged AND carried -- never silently dropped."""
+    from desk.core.compare import mark_positions
+    ledger = [{"market_id": "orphan", "venue": "kalshi", "side": "YES",
+               "shares": 50, "avg_price_cents": 61.0}]
+    marked, _ = mark_positions(ledger, {})
+    assert len(marked) == 1
+    assert marked[0]["market_id"] == "orphan"
+    assert marked[0]["mark"] is None, "unpriced, but present"
+
+
+# ---------------------------------------------------------- add-race tooling
+
+def test_parse_input_accepts_tickers_and_urls():
+    from tools.add_race import parse_input
+    assert parse_input("KXSENATEMID-26-AELS") == "KXSENATEMID-26-AELS"
+    assert parse_input("  kxsenatemid-26-aels ") == "KXSENATEMID-26-AELS"
+    assert parse_input("https://kalshi.com/markets/KXSENATEMID-26-AELS") == "KXSENATEMID-26-AELS"
+    assert parse_input(
+        "https://kalshi.com/markets/kxgovwinomd/wisconsin-governor?foo=1"
+    ).startswith("KXGOVWINOMD")
+
+
+def test_parse_input_rejects_empty():
+    import pytest as _p
+    from tools.add_race import parse_input
+    with _p.raises(ValueError):
+        parse_input("   ")
+
+
+def test_candidates_are_ordered_by_price_and_drop_the_dust():
+    """A primary board's tail sits at a tenth of a cent; OR-ing 16 names is noise."""
+    from tools.add_race import derive_candidates
+    sibs = [
+        {"yes_sub_title": "Mike Lindell", "yes_bid_dollars": "0.61"},
+        {"yes_sub_title": "Lisa Demuth", "yes_bid_dollars": "0.34"},
+        {"yes_sub_title": "Kendall Qualls", "yes_bid_dollars": "0.013"},
+        {"yes_sub_title": "Brad Kohler", "yes_bid_dollars": "0.0000"},
+        {"yes_sub_title": "Scott Jensen", "yes_bid_dollars": "0.0000"},
+    ]
+    assert derive_candidates(sibs) == ["Mike Lindell", "Lisa Demuth", "Kendall Qualls"]
+
+
+def test_block_is_valid_yaml_and_appends_without_touching_comments():
+    """watchlist.yaml carries the Kalshi series map in comments.
+
+    A yaml.safe_load/safe_dump round-trip would delete all of it, so the block is
+    built as text and appended.
+    """
+    import yaml
+    from tools.add_race import build_block
+    existing = ("# KALSHI SERIES MAP -- do not lose this comment\n"
+                "- id: keep-me\n  race_tag: keep\n  active: true\n")
+    block = build_block(
+        target={"ticker": "KXFOO-26-BAR", "event_ticker": "KXFOO-26",
+                "title": "Will Bar win?", "yes_sub_title": "Bar Person"},
+        siblings=[{}, {}], race_tag="kxfoo-26", market_id="kxfoo-26-bar",
+        candidates=["Bar Person", "Baz Rival"], resolution_date="2026-08-04",
+        pm_condition=None, clip=150)
+    merged = existing.rstrip() + "\n" + block
+    parsed = yaml.safe_load(merged)
+    assert len(parsed) == 2
+    assert parsed[1]["kalshi_ticker"] == "KXFOO-26-BAR"
+    assert parsed[1]["candidates"] == ["Bar Person", "Baz Rival"]
+    assert parsed[1]["active"] is True
+    assert "KALSHI SERIES MAP" in merged, "existing comments must survive"
+
+
+def test_missing_resolution_date_stages_the_race_inactive():
+    """close_time is a placeholder on these boards, so a date is never guessed.
+
+    Staging inactive keeps a race with no real date out of the alert path
+    instead of giving it a countdown to a date invented from venue metadata.
+    """
+    import yaml
+    from tools.add_race import build_block
+    block = build_block(
+        target={"ticker": "KXFOO-26-BAR", "event_ticker": "KXFOO-26",
+                "title": "Will Bar win?", "yes_sub_title": "Bar"},
+        siblings=[{}], race_tag="kxfoo-26", market_id="kxfoo-26-bar",
+        candidates=["Bar"], resolution_date=None, pm_condition=None, clip=150)
+    row = yaml.safe_load(block)[0]
+    assert row["resolution_date"] is None
+    assert row["active"] is False
+    assert "NEEDS A HUMAN" in block
+
+
+def test_polymarket_condition_id_round_trips():
+    import yaml
+    from tools.add_race import build_block
+    cond = "0x" + "a" * 64
+    block = build_block(
+        target={"ticker": "T", "event_ticker": "E", "title": "t", "yes_sub_title": "s"},
+        siblings=[{}], race_tag="r", market_id="m", candidates=["s"],
+        resolution_date="2026-08-04", pm_condition=cond, clip=86)
+    row = yaml.safe_load(block)[0]
+    assert row["polymarket_condition_id"] == cond
+    assert row["clip_size"] == 86
+
+
+def test_race_tag_never_collides_with_an_existing_one():
+    from tools.add_race import make_race_tag
+    assert make_race_tag("KXFOO-26", set()) == "kxfoo-26"
+    assert make_race_tag("KXFOO-26", {"kxfoo-26"}) == "kxfoo-26-2"
+    assert make_race_tag("KXFOO-26", {"kxfoo-26", "kxfoo-26-2"}) == "kxfoo-26-3"
+
+
+def test_quotes_in_a_market_title_cannot_break_the_yaml():
+    import yaml
+    from tools.add_race import build_block
+    block = build_block(
+        target={"ticker": "T", "event_ticker": "E",
+                "title": 'Will "Scare Quotes" Smith win?', "yes_sub_title": 'The "Guy"'},
+        siblings=[{}], race_tag="r", market_id="m", candidates=['The "Guy"'],
+        resolution_date="2026-08-04", pm_condition=None, clip=150)
+    row = yaml.safe_load(block)[0]
+    assert "Scare Quotes" in row["market_title"]
