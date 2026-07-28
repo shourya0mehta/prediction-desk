@@ -79,6 +79,20 @@ def build(root: str, prefix: str, snapshot: dict, universe: list | None,
                      "traded in the last 24h."),
             "markets": universe,
         }, indent=1))
+    else:
+        # The universe is only swept on the runs nearest the two brief times, but
+        # Pages is republished wholesale every run -- so without this the file
+        # 404s for the analyst on all the other runs. Carry the gist's last good
+        # copy forward instead of dropping it.
+        try:
+            carried = gist.read("universe.json")
+        except Exception as e:
+            log.error("could not carry universe.json forward: %s", e)
+            carried = None
+        if carried:
+            put("universe.json", carried)
+        else:
+            log.warning("no universe.json to carry forward; the analyst will 404 on it")
 
     # Mirror the static config straight off the gist so there is one source of
     # truth and no chance of the two drifting.

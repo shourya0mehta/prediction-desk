@@ -764,3 +764,42 @@ def test_site_refuses_to_publish_without_a_prefix():
     from desk.core import site
     with _pytest.raises(ValueError):
         site.build("/tmp/nope", "", {}, None, None, None, {})
+
+
+def test_universe_is_carried_forward_on_runs_that_do_not_sweep():
+    """Pages is republished wholesale every run.
+
+    The universe is only swept near the two brief times, so without carrying the
+    last good copy forward the file 404s for the analyst on every other run --
+    observed live.
+    """
+    import json, tempfile
+    from pathlib import Path
+    from desk.core import site
+
+    class FakeGist:
+        def read(self, name):
+            return '{"count": 7, "markets": []}' if name == "universe.json" else None
+        def _load(self):
+            return {}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        site.build(tmp, "abc123", {"generated_at_pt": "x"}, None, None, FakeGist(), {})
+        got = json.loads((Path(tmp) / "d/abc123/universe.json").read_text())
+        assert got["count"] == 7
+
+
+def test_missing_universe_does_not_crash_the_mirror():
+    import tempfile
+    from pathlib import Path
+    from desk.core import site
+
+    class FakeGist:
+        def read(self, name):
+            return None
+        def _load(self):
+            return {}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        site.build(tmp, "abc123", {"generated_at_pt": "x"}, None, None, FakeGist(), {})
+        assert (Path(tmp) / "d/abc123/snapshot.json").exists()
