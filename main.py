@@ -231,7 +231,12 @@ def run(args) -> int:
         # from that race's `candidates` list. The derived feeds replace the
         # manual Google Alerts setup, so adding a race brings its news coverage
         # with it and there is nothing to click.
-        derived = feeds_mod.derive_feeds(active)
+        # Election night polls every ~150s. Eleven derived Google News feeds
+        # need ~60s of deliberate spacing to avoid the rate limiter, and news
+        # does not move inside a 150-second window anyway -- prices do. So the
+        # per-race news feeds are skipped in that mode and the static pulse
+        # feeds carry on.
+        derived = [] if args.election_night else feeds_mod.derive_feeds(active)
         all_feeds = list(feeds_cfg) + derived
         log.info("feeds: %d static + %d derived", len(feeds_cfg), len(derived))
         feed_items, feed_errors = feeds_mod.collect(http, all_feeds, race_keyword_map(watchlist))

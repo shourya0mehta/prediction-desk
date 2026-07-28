@@ -25,10 +25,19 @@ UA = "prediction-desk/1.0 (+https://github.com/) read-only feed reader"
 
 GOOGLE_NEWS_SEARCH = "https://news.google.com/rss/search"
 
-# Politeness between feed fetches: a small randomised pause so a burst of
-# derived feeds never looks like a scrape to Google News.
-POLITE_DELAY_RANGE = (0.4, 1.1)
+# Politeness between feed fetches, applied PER HOST.
+#
+# The first Actions run of the derived feeds got HTTP 503 on all eleven Google
+# News requests, while a single probe request from the same runner minutes later
+# returned 200 with 100 items. So this is rate limiting, not a datacenter-IP
+# block, and the fix is spacing rather than headers. A global 0.4-1.1s jitter is
+# far too aggressive when eleven consecutive requests all hit news.google.com.
+POLITE_DELAY_RANGE = (0.4, 1.1)          # between different hosts
+SAME_HOST_DELAY_RANGE = (3.5, 6.0)       # between requests to the SAME host
 MAX_RETRIES = 3
+
+# 503 from a rate limiter needs a much longer wait than a transient 5xx.
+RATE_LIMIT_BACKOFF = (8.0, 20.0, 35.0)
 
 # Words that mean a race just changed shape. Kept blunt on purpose -- a false
 # positive costs one glance at a headline; a false negative costs a position.
@@ -114,10 +123,16 @@ def fetch_feed(client: httpx.Client, url: str, retries: int = MAX_RETRIES) -> tu
             r = client.get(url, headers={"User-Agent": UA})
             if r.status_code == 429 or 500 <= r.status_code < 600:
                 retry_after = r.headers.get("Retry-After")
-                wait = delay
+                # 429 and 503 mean "you are going too fast"; a plain 5xx is more
+                # likely transient. Google News answers 503 when rate limiting,
+                # and recovers only after a real pause.
+                if r.status_code in (429, 503):
+                    wait = RATE_LIMIT_BACKOFF[min(attempt, len(RATE_LIMIT_BACKOFF) - 1)]
+                else:
+                    wait = delay
                 if retry_after:
                     try:
-                        wait = max(delay, float(retry_after))
+                        wait = max(wait, float(retry_after))
                     except ValueError:
                         pass
                 last_err = f"HTTP {r.status_code}"
@@ -208,16 +223,21 @@ def collect(client: httpx.Client, feeds: list[dict], race_keywords: dict[str, li
     seen: set[str] = set()
     items: list[dict] = []
     errors: list[str] = []
+    last_host: str | None = None
 
     for i, f in enumerate(feeds):
         url, source = f.get("url"), f.get("source") or f.get("tag") or "feed"
         if not url or not f.get("active", True):
             continue
 
-        # Jittered pause between fetches. Derived feeds all hit the same host,
-        # so a tight loop would look like scraping.
+        # Jittered pause between fetches, longer when the previous request went
+        # to the same host. Eleven derived feeds all hit news.google.com, and at
+        # the short interval every one of them came back 503.
+        host = urllib.parse.urlsplit(url).netloc.lower()
         if i:
-            time.sleep(random.uniform(*POLITE_DELAY_RANGE))
+            rng = SAME_HOST_DELAY_RANGE if host == last_host else POLITE_DELAY_RANGE
+            time.sleep(random.uniform(*rng))
+        last_host = host
 
         entries, err = fetch_feed(client, url)
         if err:
