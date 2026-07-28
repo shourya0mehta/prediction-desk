@@ -163,6 +163,23 @@ the ~1,800 with real 24h volume, which is 0.70 MB and greppable in one fetch.
 specific dormant market, query the Kalshi API directly rather than concluding it
 does not exist.
 
+**The analyst reads GitHub Pages, not the gist.** The scheduled-task sandbox
+cannot reach `gist.githubusercontent.com` at all, and its fallback route
+truncates large files mid-document — the first cloud brief lost everything after
+the WA-05 block. Every poll republishes the analyst-facing files to Pages under
+an unguessable `/d/<random32>/` prefix (the `PAGES_PREFIX` secret). The gist
+remains internal state and config; the token model is unchanged. `robots.txt`
+disallows everything and HTML carries `noindex` — note that GitHub Pages cannot
+set custom HTTP headers, so `X-Robots-Tag` is not available and the prefix is
+the real control, exactly as with the secret gist.
+
+**Google News rate-limits bursts.** Eleven derived feeds fired 0.4–1.1s apart
+returned HTTP 503 on every one from an Actions runner, while a single request
+from the same runner got 200 — rate limiting, not an IP block. Fetches are now
+spaced 3.5–6s when consecutive requests hit the same host, and 429/503 back off
+8/20/35s. Election-night mode skips the derived news feeds entirely: they need
+~60s of spacing and the poll interval is 150s.
+
 **Gist writes can collide.** The analyst task appends its brief to the same
 gist the poll publishes into, and GitHub answers `409 Gist cannot be updated`
 when two writers overlap — seen in production at 2:44 PM. `Gist.write` retries
