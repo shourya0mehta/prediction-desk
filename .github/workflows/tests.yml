@@ -19,14 +19,23 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt pytest
       - run: python -m pytest tests/ -v
-      # Guard the single most important invariant in the repo.
+      # Guard the single most important invariant in the repo: this system holds
+      # no trading credential of any kind. This file is excluded from its own
+      # scan, since it necessarily contains the patterns it searches for.
       - name: Assert no trading credentials anywhere
         run: |
-          if grep -rniE "kalshi[_-]?(api[_-]?)?(key|secret)|private[_-]?key|KALSHI_ACCESS" \
-               --include="*.py" --include="*.yml" --include="*.yaml" --include="*.md" . ; then
+          SELF=".github/workflows/tests.yml"
+          if grep -rniE "kalshi[_-]?(api[_-]?)?(key|secret)|private[_-]?key|KALSHI_ACCESS|mnemonic|seed[_-]?phrase" \
+               --include="*.py" --include="*.yml" --include="*.yaml" --include="*.md" \
+               --exclude-dir=.git . | grep -v "^\./$SELF:" ; then
             echo "::error::a trading-credential reference appeared in the repo"; exit 1
           fi
-          if grep -rn "0x9c2dfba5885f5602b9339f8e4ee862ea8537350b" --include="*.yml" --include="*.yaml" . ; then
+          # The decoy wallet is an empty international shell that must never be
+          # polled as if it were the owner's account. polymarket.py refuses it by
+          # address, so the literal appears there and in docs on purpose; it must
+          # never appear in a config file.
+          if grep -rn "0x9c2dfba5885f5602b9339f8e4ee862ea8537350b" \
+               --include="*.yml" --include="*.yaml" --exclude-dir=.git . ; then
             echo "::error::the decoy wallet must never appear in config"; exit 1
           fi
           echo "clean"
