@@ -1,0 +1,78 @@
+name: election-night
+
+# Fire manually on the evenings of Tue Aug 4 and Tue Aug 11, 2026.
+# One job loops internally (poll -> sleep) rather than relying on cron, because
+# GitHub's scheduler cannot go below 5 minutes and drifts under load.
+on:
+  workflow_dispatch:
+    inputs:
+      duration_hours:
+        description: "How long to run (max 5; the job limit is 6h)"
+        default: "5"
+      interval_seconds:
+        description: "Seconds between polls"
+        default: "150"
+      race_tags:
+        description: "Comma-separated race tags to focus (blank = all active)"
+        default: ""
+
+concurrency:
+  group: desk-election-night
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Announce
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          curl -fsS -H "Title: Election-night mode ON" -H "Priority: 4" \
+            -d "Polling every ${{ github.event.inputs.interval_seconds }}s for ${{ github.event.inputs.duration_hours }}h. Move threshold tightened to 2c, quiet hours bypassed." \
+            "https://ntfy.sh/${NTFY_TOPIC}" || true
+
+      - name: High-frequency loop
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          RACE_TAGS: ${{ github.event.inputs.race_tags }}
+        run: |
+          set -u
+          DURATION=$(( ${{ github.event.inputs.duration_hours }} * 3600 ))
+          INTERVAL=${{ github.event.inputs.interval_seconds }}
+          END=$(( $(date +%s) + DURATION ))
+          N=0
+          while [ "$(date +%s)" -lt "$END" ]; do
+            N=$(( N + 1 ))
+            echo "::group::poll #$N  $(date -u +%H:%M:%SZ)"
+            # A single bad poll must not end the night; keep looping and let the
+            # pipeline's own ntfy self-alert report the error.
+            python main.py --election-night || echo "poll #$N failed, continuing"
+            echo "::endgroup::"
+            REMAINING=$(( END - $(date +%s) ))
+            [ "$REMAINING" -le 0 ] && break
+            sleep $(( INTERVAL < REMAINING ? INTERVAL : REMAINING ))
+          done
+          echo "completed $N polls"
+
+      - name: Announce end
+        if: always()
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          curl -fsS -H "Title: Election-night mode OFF" -H "Priority: 3" \
+            -d "High-frequency window finished. Back to the 30-minute cadence." \
+            "https://ntfy.sh/${NTFY_TOPIC}" || true

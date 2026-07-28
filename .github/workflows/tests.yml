@@ -1,0 +1,32 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest tests/ -v
+      # Guard the single most important invariant in the repo.
+      - name: Assert no trading credentials anywhere
+        run: |
+          if grep -rniE "kalshi[_-]?(api[_-]?)?(key|secret)|private[_-]?key|KALSHI_ACCESS" \
+               --include="*.py" --include="*.yml" --include="*.yaml" --include="*.md" . ; then
+            echo "::error::a trading-credential reference appeared in the repo"; exit 1
+          fi
+          if grep -rn "0x9c2dfba5885f5602b9339f8e4ee862ea8537350b" --include="*.yml" --include="*.yaml" . ; then
+            echo "::error::the decoy wallet must never appear in config"; exit 1
+          fi
+          echo "clean"

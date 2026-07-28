@@ -1,0 +1,64 @@
+name: poll
+
+# Every 30 minutes. GitHub cron drifts a few minutes under load; harmless here.
+# Public repo => unlimited free Actions minutes, which is what makes the
+# election-night high-frequency mode free as well.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      universe:
+        description: "Also refresh universe.json"
+        type: boolean
+        default: false
+
+concurrency:
+  group: desk-poll
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      # The universe sweep is the analyst's discovery surface and only needs to
+      # be fresh at the two brief times. This picks the runs nearest 07:30 and
+      # 17:30 PT (14:30 and 00:30 UTC) so the file is warm when the brief fires.
+      - name: Decide whether to refresh the universe
+        id: mode
+        run: |
+          HOUR_UTC=$(date -u +%H); MIN_UTC=$(date -u +%M)
+          FLAG=""
+          if [ "${{ github.event.inputs.universe }}" = "true" ]; then FLAG="--universe"; fi
+          if { [ "$HOUR_UTC" = "14" ] || [ "$HOUR_UTC" = "00" ]; } && [ "$MIN_UTC" -lt 30 ]; then
+            FLAG="--universe"
+          fi
+          echo "flag=$FLAG" >> "$GITHUB_OUTPUT"
+
+      - name: Poll
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python main.py ${{ steps.mode.outputs.flag }}
+
+      # A failed job must still reach the phone -- spec 0.3, fail loud.
+      - name: Report failure
+        if: failure()
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          curl -fsS -H "Title: Prediction desk: poll job FAILED" -H "Priority: 5" \
+            -d "The scheduled poll workflow failed. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            "https://ntfy.sh/${NTFY_TOPIC}" || true

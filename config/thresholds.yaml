@@ -1,0 +1,34 @@
+# Non-sensitive alert defaults. Checked in deliberately: nothing here is private,
+# and having it in git means threshold changes show up in the diff.
+#
+# A copy of this file placed in the gist as thresholds.yaml overrides these
+# without a commit, which is the fast path for tuning during an election night.
+
+clip_size_default: 150            # contracts walked when a watchlist row omits clip_size
+
+# --- price movement (cents)
+single_poll_move_cents: 4         # default-priority alert
+single_poll_move_high_cents: 8    # high-priority alert
+cumulative_move_cents: 7          # measured against the last 07:30/17:30 PT baseline
+
+# --- flow
+volume_spike_multiple: 3          # interval volume vs the 24h per-interval baseline
+large_print_notional: 500         # dollars; a $500 print in a $27k primary book is signal
+large_print_median_multiple: 5    # or 5x this market's own trailing 24h median print
+
+# --- cross-venue divergence
+# NOT an arbitrage. The owner cannot trade the international Polymarket book, and
+# segregated books carry persistent structural spreads, so this fires on movement
+# away from the market's own 7-day median gap rather than on absolute level.
+gap_dislocation_cents: 3
+
+# --- whales
+whale_notional_change: 500        # dollars of position value change worth waking up for
+
+# --- delivery discipline
+cooldown_minutes: 60              # per (market, trigger); a further full step re-fires
+quiet_hours_min_move_cents: 10    # 23:00-07:00 PT floor, bypassed on election night
+stale_snapshot_minutes: 120       # heartbeat fails past this
+
+# --- election night (workflow_dispatch)
+election_night_move_cents: 2

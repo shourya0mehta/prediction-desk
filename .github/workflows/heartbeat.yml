@@ -1,0 +1,29 @@
+name: heartbeat
+
+# 08:05 PT daily = 15:05 UTC (PDT, UTC-7). Verifies the last snapshot is fresh
+# and both venues answer. Pushes ONLY on failure -- a healthy desk is silent.
+on:
+  schedule:
+    - cron: "5 15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Self-test
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python main.py --selftest
