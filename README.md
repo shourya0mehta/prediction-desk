@@ -142,6 +142,14 @@ on your PM-US ledger — a ten-cent gap. Every Polymarket price here is tagged
 `intl_reference` and is a leading indicator, never a quote you can hit. The decoy
 wallet `0x9c2d…350b` is refused in code.
 
+**`universe.json` lists markets that traded in the last 24 hours,** not every
+open market. The full political board is ~13,300 markets and 4.35 MB, of which
+~11,500 have never traded and include placeholders dated 2099. The sweep keeps
+the ~1,800 with real 24h volume, which is 0.70 MB and greppable in one fetch.
+`sweep_stats` in the file reports exactly what was dropped. If you are hunting a
+specific dormant market, query the Kalshi API directly rather than concluding it
+does not exist.
+
 **The cross-venue number is not an arbitrage.** You cannot trade the
 international book. It fires on movement away from that market's own 7-day median
 gap, because segregated books carry persistent structural spreads that would
@@ -189,8 +197,12 @@ takes `round_trip=True` when you really are selling early.
 python -m pytest tests/ -v
 ```
 
-25 tests covering book normalisation (including the bids-only inversion and
+31 tests covering book normalisation (including the bids-only inversion and
 empty/partial books), clip walks against a real captured fixture, the thin-book
-flag, and both venues' fee schedules — including the banker's-rounding cases and
-the maker sign flip. `tests/test_books.py`'s module docstring carries the fully
+flag, both venues' fee schedules — including the banker's-rounding cases and the
+maker sign flip — and a regression for each bug found by running the pipeline
+against live data. `tests/test_books.py`'s module docstring carries the fully
 worked 150-contract example.
+
+CI additionally fails the build if a trading-credential-shaped string, or the
+decoy wallet, ever appears in a config file.
