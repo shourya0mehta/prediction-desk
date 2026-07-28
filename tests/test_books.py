@@ -961,3 +961,209 @@ def test_quotes_in_a_market_title_cannot_break_the_yaml():
         resolution_date="2026-08-04", pm_condition=None, clip=150)
     row = yaml.safe_load(block)[0]
     assert "Scare Quotes" in row["market_title"]
+
+
+# ================================================================= scout layer
+
+from datetime import date as _date, datetime as _dt, timedelta as _td, timezone as _tz  # noqa: E402
+
+
+# ---------------------------------------------------- price band (two tiers)
+
+def test_band_is_77c_beyond_a_week():
+    from desk.core.scout import band_limit, in_band
+    assert band_limit(30, {}) == 0.77
+    assert in_band("0.77", 30, {}) is True
+    assert in_band("0.78", 30, {}) is False
+    assert in_band("0.85", 30, {}) is False, "the near-tier must not leak into long-dated"
+
+
+def test_band_rises_to_85c_inside_a_week():
+    """80-85c is the intended zone for a short-dated favourite, not an accident."""
+    from desk.core.scout import band_limit, in_band
+    assert band_limit(7, {}) == 0.85
+    assert band_limit(1, {}) == 0.85
+    assert in_band("0.85", 7, {}) is True
+    assert in_band("0.82", 3, {}) is True
+    assert in_band("0.86", 3, {}) is False
+
+
+def test_band_has_no_middle_tier():
+    """The 21-day/80c tier was removed; day 8 and day 21 must both be 77c."""
+    from desk.core.scout import band_limit
+    assert band_limit(8, {}) == 0.77
+    assert band_limit(21, {}) == 0.77
+    assert band_limit(20, {}) == 0.77
+    assert in_band_helper(0.80, 20) is False
+
+
+def in_band_helper(ask, days):
+    from desk.core.scout import in_band
+    return in_band(str(ask), days, {})
+
+
+def test_band_boundary_is_exactly_at_seven_days():
+    from desk.core.scout import band_limit
+    assert band_limit(7, {}) == 0.85
+    assert band_limit(8, {}) == 0.77
+
+
+def test_band_rejects_degenerate_prices():
+    from desk.core.scout import in_band
+    assert in_band("0", 3, {}) is False
+    assert in_band("1", 3, {}) is False
+
+
+def test_band_thresholds_are_configurable():
+    from desk.core.scout import band_limit
+    t = {"band_ask_standard": 0.5, "band_ask_near": 0.9, "band_near_days": 14}
+    assert band_limit(20, t) == 0.5
+    assert band_limit(10, t) == 0.9
+
+
+# ----------------------------------------------------------------- appendix
+
+def test_band_excluded_markets_are_not_silently_dropped():
+    """Full coverage means an exclusion has to be visible and reversible."""
+    from desk.core.scout import in_band, band_limit
+    rows = [{"ticker": "A", "ask": "0.60", "days": 30},
+            {"ticker": "B", "ask": "0.82", "days": 30},
+            {"ticker": "C", "ask": "0.82", "days": 3}]
+    kept, appendix = [], []
+    for r in rows:
+        (kept if in_band(r["ask"], r["days"], {}) else appendix).append(r)
+    assert [r["ticker"] for r in kept] == ["A", "C"]
+    assert [r["ticker"] for r in appendix] == ["B"]
+    assert band_limit(30, {}) == 0.77
+
+
+# ----------------------------------------------------------- classification
+
+def test_appointments_are_not_primaries():
+    """A live sweep put 16 Fed/judiciary nomination markets into a primary batch."""
+    from desk.core.scout import classify
+    for title in [
+        "Will someone be nominated for a member of the Federal Reserve Board?",
+        "Will Blanche be reported to the Senate Judiciary Committee?",
+        "Will someone be nominated for member of the Election Assistance Commission?",
+    ]:
+        assert classify({"title": title}) == "other", title
+
+
+def test_real_primaries_still_classify():
+    from desk.core.scout import classify
+    assert classify({"title": "Will Abdul El-Sayed be the Democratic nominee for the Senate in Michigan?"}) == "primary"
+    assert classify({"title": "WA-05 primary: who will advance?"}) == "primary"
+    assert classify({"title": "South Carolina Republican Senate special primary"}) == "special"
+
+
+def test_party_resolved_markets_are_generals_not_primaries():
+    """The Maine trap: the subtitle carries a person's name, the rules say party."""
+    from desk.core.scout import classify
+    m = {"ticker": "SENATEME-26-D", "title": "Maine Senate winner?",
+         "yes_sub_title": "Troy Jackson",
+         "rules_primary": "If a representative of the Democratic party is sworn in..."}
+    assert classify(m) == "general"
+
+
+# ------------------------------------------------- resolution date sourcing
+
+def test_resolution_date_prefers_the_watchlist_then_the_calendar():
+    from desk.core.scout import infer_resolution
+    m = {"ticker": "KXWAPRIMARY-0526-NPOW", "title": "WA-05 primary: who will advance?",
+         "close_time": "2027-11-03T15:00:00Z"}
+    d, src = infer_resolution(m, None, {"KXWAPRIMARY-0526-NPOW": {"resolution_date": "2026-08-04"}})
+    assert d == _date(2026, 8, 4) and src == "watchlist"
+    d2, src2 = infer_resolution(m, None, {})
+    assert d2 == _date(2026, 8, 4), "must fall back to the WA primary calendar"
+    assert src2.startswith("primary_calendar_2026")
+
+
+def test_close_time_is_never_silently_trusted():
+    """close_time reads 2027 for a 2026 primary; using it unflagged hides races."""
+    from desk.core.scout import infer_resolution
+    m = {"ticker": "X", "title": "Some untagged nomination contest",
+         "close_time": "2027-11-03T15:00:00Z"}
+    d, src = infer_resolution(m, None, {})
+    assert src.endswith("UNRELIABLE")
+
+
+# ------------------------------------------------------------ consolidation
+
+def _iso(hours_ago):
+    return (_dt.now(_tz.utc) - _td(hours=hours_ago)).isoformat()
+
+
+def test_whale_consolidation_needs_two_wallets_and_the_dollar_floor():
+    from desk.core.scout import whale_consolidation
+    hist = {"w1": {"c1": [[_iso(24), 1500.0]]},
+            "w2": {"c1": [[_iso(48), 900.0]]}}
+    assert whale_consolidation("c1", hist, {}) is not None       # 2 wallets, $2400
+    one = {"w1": {"c1": [[_iso(24), 5000.0]]}}
+    assert whale_consolidation("c1", one, {}) is None, "one wallet is not consensus"
+    small = {"w1": {"c1": [[_iso(24), 500.0]]}, "w2": {"c1": [[_iso(24), 400.0]]}}
+    assert whale_consolidation("c1", small, {}) is None, "under the $2k floor"
+
+
+def test_whale_consolidation_ignores_adds_outside_the_window():
+    from desk.core.scout import whale_consolidation
+    stale = {"w1": {"c1": [[_iso(24 * 30), 5000.0]]},
+             "w2": {"c1": [[_iso(24 * 30), 5000.0]]}}
+    assert whale_consolidation("c1", stale, {}) is None
+
+
+def test_print_consolidation_needs_three_same_side_qualifying_prints():
+    from desk.core.scout import print_consolidation
+    same = [{"ts": _iso(1), "notional": "400", "taker_side": "yes"},
+            {"ts": _iso(5), "notional": "500", "taker_side": "yes"},
+            {"ts": _iso(9), "notional": "600", "taker_side": "yes"}]
+    assert print_consolidation(same, {})["side"] == "yes"
+    split = [{"ts": _iso(1), "notional": "400", "taker_side": "yes"},
+             {"ts": _iso(5), "notional": "500", "taker_side": "no"},
+             {"ts": _iso(9), "notional": "600", "taker_side": "yes"}]
+    assert print_consolidation(split, {}) is None, "opposite sides are not accumulation"
+    tiny = [{"ts": _iso(1), "notional": "10", "taker_side": "yes"}] * 5
+    assert print_consolidation(tiny, {}) is None, "below the notional floor"
+
+
+# ------------------------------------------------------------ batch picking
+
+def pick_batch(pack_dates: list[str], covered: list[str], today: _date) -> str | None:
+    """Nearest uncovered settlement date at or after today."""
+    future = sorted(d for d in pack_dates if _date.fromisoformat(d) >= today)
+    for d in future:
+        if d not in covered:
+            return d
+    return None
+
+
+def test_batch_selection_takes_the_nearest_uncovered_window():
+    dates = ["2026-08-04", "2026-08-11", "2026-08-18"]
+    today = _date(2026, 7, 28)
+    assert pick_batch(dates, [], today) == "2026-08-04"
+    assert pick_batch(dates, ["2026-08-04"], today) == "2026-08-11"
+    assert pick_batch(dates, ["2026-08-04", "2026-08-11"], today) == "2026-08-18"
+    assert pick_batch(dates, dates, today) is None
+
+
+def test_batch_selection_skips_dates_already_past():
+    dates = ["2026-08-04", "2026-08-11"]
+    assert pick_batch(dates, [], _date(2026, 8, 5)) == "2026-08-11"
+
+
+# ------------------------------------------------------------------ sizing
+
+def test_quarter_kelly_sizes_against_the_thousand_dollar_bankroll():
+    """Sizing uses target_bankroll_usd (1000), not the current balance."""
+    bankroll = 1000
+    p, price = 0.60, 0.45           # our probability vs the ask
+    b = (1 - price) / price
+    kelly = (p * b - (1 - p)) / b
+    quarter = kelly / 4
+    dollars = round(bankroll * quarter, 2)
+    assert 0 < quarter < 0.25
+    assert dollars == round(1000 * quarter, 2)
+    # A negative edge must never produce a position.
+    p_bad = 0.40
+    kelly_bad = (p_bad * b - (1 - p_bad)) / b
+    assert kelly_bad < 0

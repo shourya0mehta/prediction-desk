@@ -35,3 +35,30 @@ stale_snapshot_minutes: 120       # heartbeat fails past this
 
 # --- election night (workflow_dispatch)
 election_night_move_cents: 2
+
+# --- scout layer (daily scout-pack.json) --------------------------------
+horizon_days: 75                  # only races resolving inside this window
+
+# Price band applies to the BUY-SIDE ASK -- what you would actually pay.
+# Two tiers only: beyond a week the bar is 77c, because paying more than that
+# for a binary needs an edge that rarely survives fees. Inside a week it rises
+# to 85c, since a favourite at 80-85c settling in days is a different
+# instrument -- short-dated and high-probability, the intended zone for that
+# window rather than an accident.
+band_ask_standard: 0.77
+band_ask_near: 0.85
+band_near_days: 7
+
+stale_hours: 24
+wide_spread_cents: 6
+thin_volume_24h: 50
+dead_tail_min_price: 0.05         # priced like a real chance...
+dead_tail_max_raised: 25000       # ...funded like nobody
+
+whale_consolidation_wallets: 2    # distinct tracked wallets, same side
+whale_consolidation_usd: 2000     # combined net adds
+whale_consolidation_days: 7
+print_consolidation_count: 3      # same-side qualifying Kalshi prints
+print_consolidation_hours: 72
+print_consolidation_min_notional: 250
+max_trade_lookups: 250            # per run; overflow reported, never silent

@@ -18,6 +18,10 @@ on:
         description: "Also refresh universe.json"
         type: boolean
         default: false
+      scout:
+        description: "Also run the scout sweep (heavy; normally daily)"
+        type: boolean
+        default: false
 
 concurrency:
   group: desk-poll
@@ -61,6 +65,39 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           PAGES_PREFIX: ${{ secrets.PAGES_PREFIX }}
         run: python main.py ${{ steps.mode.outputs.flag }} --emit-site ./site
+
+      # Scout runs once a day, on the run nearest 05:30 PT (12:30 UTC). It is a
+      # full-board sweep plus per-market enrichment, so it is far heavier than a
+      # poll and there is nothing it can learn from running every 30 minutes.
+      - name: Decide whether to run the scout
+        id: scout
+        run: |
+          HOUR_UTC=$(date -u +%H); MIN_UTC=$(date -u +%M)
+          RUN=""
+          if [ "${{ github.event.inputs.scout }}" = "true" ]; then RUN="yes"; fi
+          if [ "$HOUR_UTC" = "12" ] && [ "$MIN_UTC" -lt 30 ]; then RUN="yes"; fi
+          echo "run=$RUN" >> "$GITHUB_OUTPUT"
+
+      - name: Scout sweep
+        if: steps.scout.outputs.run == 'yes'
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          PAGES_PREFIX: ${{ secrets.PAGES_PREFIX }}
+          FEC_API_KEY: ${{ secrets.FEC_API_KEY }}
+        run: python tools/scout.py --emit-site ./site
+
+      # Carry yesterday's scout pack forward on the ~47 runs a day that do not
+      # rebuild it, or Pages would 404 the file for the analyst -- the same trap
+      # universe.json fell into.
+      - name: Carry the scout pack forward
+        if: steps.scout.outputs.run != 'yes'
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          PAGES_PREFIX: ${{ secrets.PAGES_PREFIX }}
+        run: python tools/carry_scout.py --emit-site ./site
 
       # Fail loudly rather than deploying an empty site over a good one.
       - name: Verify the mirror was built
