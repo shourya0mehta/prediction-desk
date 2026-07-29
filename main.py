@@ -29,6 +29,7 @@ from decimal import Decimal
 import httpx
 
 from desk.core import alerts as alert_mod
+from desk.core import relay as relay_mod
 from desk.core import compare, site as site_mod, snapshot as snap_mod
 from desk.core.books import D
 from desk.core.state import (
@@ -53,7 +54,7 @@ DEFAULT_THRESHOLDS = {
     "large_print_median_multiple": 10,
     "cooldown_minutes": 60,
     "quiet_hours_min_move_cents": 10,
-    "stale_snapshot_minutes": 120,
+    "stale_snapshot_minutes": 210,
     "election_night_move_cents": 2,
 }
 
@@ -326,11 +327,17 @@ def run(args) -> int:
             "delta_since_last_poll": d_poll,
             "delta_since_last_brief": d_brief,
         }
+        from desk.core.scout import motion as _motion
+        prior_hist = (prev_markets.get(mid_id) or {}).get("mid_history") or []
+        entry["motion"] = _motion(prior_hist,
+                                  float(mid_price) if mid_price is not None else None,
+                                  thresholds)
         markets_out.append(entry)
 
         ctx, ctx_links = attach_context(feed_items, row.get("race_tag"))
         alert_view = {
             "id": mid_id, "label": label, "mid": mid_price, "_prev_mid": prev.get("mid"),
+            "_baseline_mid": baseline.get(mid_id),
             "_context": ctx, "_links": _links(row) + ctx_links,
             "rules_diff": row.get("rules_diff"),
         }
@@ -399,7 +406,15 @@ def run(args) -> int:
                 if a:
                     engine.emit(a)
 
-        prev_markets[mid_id] = {"mid": mid_price, "volume_24h": (kblock or {}).get("volume_24h")}
+        # Trailing mid history (~2.5h of 30-min polls) powers the in_motion flag
+        # in brief-pack and the scout slices.
+        hist = list((prev_markets.get(mid_id) or {}).get("mid_history") or [])
+        if mid_price is not None:
+            hist.append([now_utc().isoformat(), str(mid_price)])
+        hist = trim_history(hist, 2.5)
+        prev_markets[mid_id] = {"mid": mid_price,
+                                "volume_24h": (kblock or {}).get("volume_24h"),
+                                "mid_history": hist}
 
     state["markets"] = prev_markets
 
@@ -602,6 +617,14 @@ def run(args) -> int:
         engine.pipeline_alert(f"Could not publish snapshot to the gist: {e}")
         return 1
 
+    # E2: republish any brief the analyst POSTed to the briefs topic since the
+    # last poll. Runs before the mirror build so a new brief ships this cycle.
+    try:
+        relay_mod.relay(gist, state, os.environ.get("BRIEFS_TOPIC", ""), http)
+        save_state(gist, state)
+    except Exception as e:
+        errors.append(f"briefs relay: {type(e).__name__}: {e}")
+
     # The Pages mirror is the read path the cloud analyst can actually reach;
     # the gist above is internal state. A mirror failure is loud but must not
     # invalidate a poll that already published successfully.
@@ -620,9 +643,14 @@ def run(args) -> int:
                 f"Snapshot published, but the Pages mirror failed: {e}\n"
                 f"The analyst reads the mirror, so its next brief will be stale.")
 
-    if errors:
+    # Feed failures are degraded coverage, not a broken desk -- the crystal-ball
+    # 403 alone was pushing a "pipeline problem" every run. Hard errors still
+    # page; feed errors stay in snapshot.errors, where the Monday housekeeping
+    # section digests them.
+    hard_errors = [e for e in errors if not str(e).startswith("feed ")]
+    if hard_errors:
         engine.pipeline_alert(
-            f"Run finished with {len(errors)} error(s):\n" + "\n".join(errors[:6]),
+            f"Run finished with {len(hard_errors)} error(s):\n" + "\n".join(hard_errors[:6]),
             level="default")
 
     log.info("published %d markets, %d alerts, %d errors",

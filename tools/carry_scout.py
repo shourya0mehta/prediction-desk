@@ -53,6 +53,7 @@ def main() -> int:
         return 0
 
     races = pack.get("races") or []
+    appendix = pack.get("appendix_band_excluded") or []
     dates = sorted({r.get("resolution_date") for r in races if r.get("resolution_date")})
     for d in dates:
         rows = [r for r in races if r.get("resolution_date") == d]
@@ -63,8 +64,21 @@ def main() -> int:
             "batch_date": d, "race_count": len(rows),
             "tradeable_count": sum(1 for r in rows if r.get("tradeable")),
             "races": rows,
+            "appendix_band_excluded": [a for a in appendix
+                                       if a.get("resolution_date") == d],
         }, indent=1), encoding="utf-8")
-    print(f"carried scout pack forward ({len(races)} races, {len(dates)} slices)")
+
+    def state_of(row):
+        src = row.get("resolution_date_source") or ""
+        return src.rsplit(":", 1)[-1] if ":" in src else None
+    states = sorted({st for st in (state_of(r) for r in races) if st})
+    for st in states:
+        rows = [r for r in races if state_of(r) == st]
+        (out_dir / f"scout-pack-{st}.json").write_text(json.dumps({
+            "state": st, "race_count": len(rows), "races": rows,
+            "appendix_band_excluded": [a for a in appendix if a.get("state") == st],
+        }, indent=1), encoding="utf-8")
+    print(f"carried scout pack forward ({len(races)} races, {len(dates)} date + {len(states)} state slices)")
     return 0
 
 

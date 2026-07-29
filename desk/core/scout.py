@@ -365,3 +365,48 @@ def print_consolidation(prints: list[dict], thresholds: dict,
                 "caveat": "anonymous tape; size and side only, no identity",
             }
     return None
+
+
+# ------------------------------------------------------------------- motion
+
+MOTION_WINDOW_HOURS = 2.2      # trailing window of 30-min polls (~4 points)
+MOTION_MIN_POINTS = 3
+MOTION_THRESHOLD_CENTS = 2.0   # |current - trailing mean| to call it in motion
+
+
+def motion(mid_history: list | None, current_mid: float | None,
+           thresholds: dict | None = None) -> dict:
+    """Trailing ~2h of mids and whether the market is currently repricing.
+
+    ``in_motion`` means the current mid has diverged from its own trailing mean
+    -- the market is moving NOW. The consumer rule (format doc D3): a market in
+    motion gets labelled "likely mid-repricing", never "arbitrage"; a gap
+    measured against a moving book is a snapshot of a transition, not an edge.
+
+    Only watchlist markets have history (the 30-min poll records them); for
+    everything else this returns available:false rather than pretending.
+    """
+    thr = float((thresholds or {}).get("in_motion_cents", MOTION_THRESHOLD_CENTS))
+    if not mid_history or current_mid is None:
+        return {"available": False, "in_motion": None,
+                "note": "no 30-min history for this market (not on the watchlist)"}
+    pts = []
+    for ts, v in mid_history[-8:]:
+        try:
+            pts.append((ts, float(v)))
+        except (TypeError, ValueError):
+            continue
+    if len(pts) < MOTION_MIN_POINTS:
+        return {"available": False, "in_motion": None,
+                "note": f"only {len(pts)} history point(s); need {MOTION_MIN_POINTS}"}
+    mean = sum(v for _, v in pts) / len(pts)
+    dev = (float(current_mid) - mean) * 100
+    return {
+        "available": True,
+        "mids_trailing_2h": [[ts, round(v, 4)] for ts, v in pts],
+        "trailing_mean": round(mean, 4),
+        "current_mid": round(float(current_mid), 4),
+        "deviation_cents": round(dev, 2),
+        "in_motion": abs(dev) >= thr,
+        "threshold_cents": thr,
+    }

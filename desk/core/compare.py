@@ -147,10 +147,28 @@ def mark_positions(ledger: list, markets_by_id: dict) -> tuple[list, str]:
         mark, basis, thin = None, None, None
         if venue == "kalshi" and kal:
             ex = kal.get("executable") or {}
-            sell = ex.get("sell_clip_vwap") or {}
-            raw = sell.get("vwap") or kal.get("mid")
-            if raw is not None:
-                mark = D(raw) if side == "YES" else (Decimal("1") - D(raw))
+            # The mark is what EXITING the held side actually nets, so each side
+            # walks its own exit book:
+            #   YES holder exits by selling YES  -> walk the YES bids (sell walk)
+            #   NO holder exits by selling NO    -> NO bids are the implied YES
+            #     asks (a YES ask at a is a NO bid at 1-a), so the NO exit is
+            #     1 - buy_clip_vwap.
+            # The old code used the YES sell walk for both and complemented it
+            # for NO, which prices the NO exit off 1 - yes_bid = the NO *ask* --
+            # the price to BUY more NO, not what selling nets. On live books that
+            # overstated the two NO positions by roughly the spread plus walk
+            # slippage (~$24 across WA-05/WA-09 at the time it was caught).
+            if side == "YES":
+                w = ex.get("sell_clip_vwap") or {}
+                raw = w.get("vwap") or kal.get("bid") or kal.get("mid")
+                if raw is not None:
+                    mark = D(raw)
+            else:
+                w = ex.get("buy_clip_vwap") or {}
+                raw = w.get("vwap") or kal.get("ask") or kal.get("mid")
+                if raw is not None:
+                    mark = Decimal("1") - D(raw)
+            if mark is not None:
                 basis = "kalshi_executable"
                 thin = bool(ex.get("thin"))
         elif venue in ("pm-us", "polymarket-us"):
@@ -172,7 +190,13 @@ def mark_positions(ledger: list, markets_by_id: dict) -> tuple[list, str]:
         }
 
         if mark is not None and shares > 0:
-            cost = shares * entry
+            # Cost basis comes from the ledger's own fee-inclusive figure when
+            # it carries one; shares*entry understates every Kalshi row by the
+            # entry fee. (MO-04's field is fee-EXCLUSIVE by owner decision --
+            # that single-row exception is documented in the register, and the
+            # ledger figure is still the authoritative one to display.)
+            ledger_cost = pos.get("cost_dollars_fee_incl")
+            cost = D(ledger_cost) if ledger_cost is not None else shares * entry
             value = shares * mark
             row["cost_basis"] = str(cost.quantize(CENT))
             row["market_value"] = str(value.quantize(CENT))

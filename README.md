@@ -201,6 +201,25 @@ the ledger against the watchlist; anything untracked lands in
 `positions.orphans` with a data-quality error, and the analyst is told to
 research it from its `market_title`. Fix one with the add-race workflow.
 
+**GitHub's scheduler skips most 30-minute slots.** Measured 2026-07-29 across
+every scheduled poll run: 9 of 9 intervals ran 80–203 minutes (median 140)
+against a `*/30` cron. This is GitHub load-shedding, not a bug here; the
+staleness threshold (210 min) and the analyst's freshness rule (~3.5h) are set
+against the measured cadence. Manual `workflow_dispatch` runs are unaffected.
+
+**Briefs flow back through ntfy.** The analyst sandbox cannot write anywhere, so
+each scheduled task POSTs its finished brief to an unguessable ntfy topic
+(`BRIEFS_TOPIC` secret) and every poll relays new messages into the gist
+(`brief-*.md` + `briefs-index.json`) and onto the mirror — the archive and the
+two-most-recent-briefs continuity step both ride on that relay.
+
+**Whale roster and consensus.** `tools/screen_whales.py` verifies candidates
+against the admission criteria (exact per-wallet 30d/lifetime P&L via
+`lb-api/profit?address=`, tenure via `sortDirection=ASC`, REDEEM counts,
+two-sided-book check). `tools/whale_book.py` publishes full political books,
+daily deltas and WATCH/STRONG/HEAVY consensus daily; STRONG/HEAVY push, HEAVY
+also appends to `standing-queue.md`.
+
 **Gist writes can collide.** The analyst task appends its brief to the same
 gist the poll publishes into, and GitHub answers `409 Gist cannot be updated`
 when two writers overlap — seen in production at 2:44 PM. `Gist.write` retries

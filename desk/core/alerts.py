@@ -165,7 +165,15 @@ def move_alert(market: dict, delta_c: float, t: dict, cumulative: bool = False) 
 
     label = market.get("label") or market.get("id")
     mid = market.get("mid")
-    prev = market.get("_prev_mid")
+    # The "from" price must be the same baseline the delta was measured against:
+    # last-poll mid for a single-poll alert, the BRIEF baseline for a cumulative
+    # one. Using _prev_mid for both rendered cumulative titles as
+    # "84->84 (+8c)" -- current price twice -- because by the cumulative check
+    # the last-poll mid usually equals the current mid.
+    prev = market.get("_baseline_mid") if cumulative else market.get("_prev_mid")
+    if prev is None and mid is not None and delta_c is not None:
+        # Reconstruct from the delta rather than print a lie.
+        prev = float(mid) - delta_c / 100
     arrow = "->"
     from_to = ""
     if prev is not None and mid is not None:

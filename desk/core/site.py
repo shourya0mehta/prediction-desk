@@ -34,6 +34,9 @@ log = logging.getLogger(__name__)
 # Files the analyst is told to fetch. Everything here is mirrored verbatim from
 # the gist except snapshot.json/universe.json, which are written fresh.
 ANALYST_FILES = (
+    "briefs-index.json",
+    "whale-book.json",
+    "standing-queue.md",
     "watchlist.yaml",
     "sources.yaml",
     "primers-index.json",
@@ -94,6 +97,58 @@ def build(root: str, prefix: str, snapshot: dict, universe: list | None,
         else:
             log.warning("no universe.json to carry forward; the analyst will 404 on it")
 
+    # A2: universe-pack.json -- the discovery pass in a fetch-survivable size.
+    # Column-array layout instead of row objects: the same 1,900+ rows cost
+    # ~700KB as objects and well under 150KB as arrays.
+    uni_src = None
+    if universe is not None:
+        uni_src = universe
+    else:
+        try:
+            carried = json.loads(gist.read("universe.json") or "{}")
+            uni_src = carried.get("markets")
+        except Exception:
+            uni_src = None
+    if uni_src:
+        def _vol(r):
+            try:
+                return int(float(r.get("volume_24h") or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        def _row(r):
+            try:
+                mid = round(float(r.get("mid")), 3) if r.get("mid") is not None else None
+            except (TypeError, ValueError):
+                mid = None
+            return [(r.get("venue") or "")[:2], r.get("id"),
+                    (r.get("title") or "")[:48], mid, _vol(r)]
+
+        # close_date is deliberately absent: on Kalshi political boards it is a
+        # far-future placeholder, and carrying a known-wrong column in a compact
+        # digest invites someone to use it. Dates live in watchlist/scout packs.
+        rows = [_row(r) for r in uni_src]
+        dropped = 0
+        budget = 150_000
+        body = lambda rs: json.dumps(rs, separators=(",", ":"))
+        if len(body(rows)) > budget - 700:
+            keep = [rw for rw in rows if rw[4] >= 50]
+            dropped = len(rows) - len(keep)
+            rows = keep
+        put("universe-pack.json", json.dumps({
+            "schema": "universe-pack/2",
+            "generated_at_pt": snapshot.get("generated_at_pt"),
+            "note": ("Compact discovery view. venue 'ka'=kalshi executable, "
+                     "'po'=polymarket INTERNATIONAL reference. Volumes are whole "
+                     "dollars/24h. close_date is omitted on purpose -- the venue "
+                     "field is unreliable; dates live in the scout pack. "
+                     + (f"{dropped} rows under $50 24h volume dropped to fit the "
+                        f"size budget -- full rows in universe.json." if dropped
+                        else "All rows carried; full detail in universe.json.")),
+            "columns": ["venue", "id", "title", "mid", "vol24"],
+            "rows": rows,
+        }, separators=(",", ":")))
+
     # Mirror the static config straight off the gist so there is one source of
     # truth and no chance of the two drifting.
     for name in ANALYST_FILES:
@@ -107,9 +162,9 @@ def build(root: str, prefix: str, snapshot: dict, universe: list | None,
             continue
         put(name, content)
 
-    # Every primer, plus the index that names them.
+    # Every primer, plus the index that names them -- and every relayed brief.
     for name, content in (gist._load() or {}).items():
-        if name.startswith("primer-") and name.endswith(".md"):
+        if name.endswith(".md") and (name.startswith("primer-") or name.startswith("brief-2")):
             put(name, content)
 
     # An index page, so a stray visitor to the prefix sees something honest
@@ -183,6 +238,15 @@ def build_brief_pack(snapshot: dict, max_bytes: int = MAX_PACK_BYTES) -> dict:
                                   "mid": p.get("mid"), "executable": False}
         if m.get("rules_diff"):
             row["rules_diff"] = m["rules_diff"]
+        # A1: resolution rules verbatim plus the one API call that refreshes
+        # this whole board (prices AND rules, unauthenticated).
+        if k.get("rules_primary"):
+            row["rules_primary"] = k["rules_primary"][:400]
+        ev = (k.get("ticker") or "").rsplit("-", 1)[0]
+        if ev:
+            row["rules_api"] = (f"https://api.elections.kalshi.com/trade-api/v2/"
+                                f"events/{ev}?with_nested_markets=true")
+        row["motion"] = m.get("motion") or {"available": False, "in_motion": None}
         return row
 
     pack = {

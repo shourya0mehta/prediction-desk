@@ -64,6 +64,7 @@ jobs:
           GIST_ID: ${{ secrets.GIST_ID }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           PAGES_PREFIX: ${{ secrets.PAGES_PREFIX }}
+          BRIEFS_TOPIC: ${{ secrets.BRIEFS_TOPIC }}
         run: python main.py ${{ steps.mode.outputs.flag }} --emit-site ./site
 
       # Scout runs once a day, on the run nearest 05:30 PT (12:30 UTC). It is a
@@ -87,6 +88,14 @@ jobs:
           PAGES_PREFIX: ${{ secrets.PAGES_PREFIX }}
           FEC_API_KEY: ${{ secrets.FEC_API_KEY }}
         run: python tools/scout.py --emit-site ./site
+
+      - name: Whale book
+        if: steps.scout.outputs.run == 'yes'
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python tools/whale_book.py
 
       # Carry yesterday's scout pack forward on the ~47 runs a day that do not
       # rebuild it, or Pages would 404 the file for the analyst -- the same trap

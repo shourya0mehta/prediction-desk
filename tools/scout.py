@@ -120,6 +120,13 @@ def main() -> int:
         return 1
 
     wl_by_ticker = {r.get("kalshi_ticker"): r for r in watchlist if r.get("kalshi_ticker")}
+    # 30-min mid history lives in pipeline state, keyed by watchlist market id.
+    hist_by_ticker = {}
+    for wl_row in watchlist:
+        tk = wl_row.get("kalshi_ticker")
+        st_m = (state.get("markets") or {}).get(wl_row.get("id")) or {}
+        if tk and st_m.get("mid_history"):
+            hist_by_ticker[tk] = st_m["mid_history"]
     fec = FECClient(http, os.environ.get("FEC_API_KEY", "DEMO_KEY"), cache=fec_cache)
 
     poller = KalshiPoller(http)
@@ -167,6 +174,12 @@ def main() -> int:
             "volume_24h": str(D(m.get("volume_24h_fp"))),
             "open_interest": str(D(m.get("open_interest_fp"))),
             "url": f"https://kalshi.com/markets/{m.get('ticker','')}",
+            # Rules verbatim, and the one API call that re-fetches this whole
+            # board -- live prices AND rules together, unauthenticated. Verified
+            # 2026-07-29 on KXGOVKSNOMD-26.
+            "rules_primary": (m.get("rules_primary") or "")[:400],
+            "rules_api": (f"https://api.elections.kalshi.com/trade-api/v2/events/"
+                          f"{m.get('event_ticker')}?with_nested_markets=true"),
         }
 
         if not S.in_band(ask, days, t):
@@ -174,6 +187,7 @@ def main() -> int:
             appendix.append({
                 **{k: base[k] for k in ("id", "title", "candidate", "ask",
                                         "resolution_date", "days_to_resolution")},
+                "state": S.detect_state(f"{base['title']} {base['id']}"),
                 "excluded_because": (
                     f"ask {ask} above the {S.band_limit(days, t):.2f} band for "
                     f"{days} days out"),
@@ -190,6 +204,16 @@ def main() -> int:
     by_event: dict[str, list] = {}
     for _, m, ev in candidates_rows:
         by_event.setdefault(m.get("event_ticker"), []).append(m)
+
+    # Viability needs the WHOLE board, including siblings that are band-excluded
+    # or unpriced -- N is a property of the race, not of our filters.
+    full_by_event: dict[str, list] = {}
+    for m, ev in pairs:
+        full_by_event.setdefault(m.get("event_ticker"), []).append(m)
+
+    def _mid(mm) -> float:
+        b, a = D(mm.get("yes_bid_dollars")), D(mm.get("yes_ask_dollars"))
+        return float((b + a) / 2) if (b and a) else float(b or 0)
 
     max_lookups = args.max_trade_lookups or int(S.cfg(t, "max_trade_lookups"))
     whale_hist = state.get("whale_history") or {}
@@ -247,6 +271,23 @@ def main() -> int:
 
         base["structural_tags"] = S.structural_tags(base, field, money)
 
+        # A4 viability: competitive N = sibling candidates with mid >= 10c;
+        # viable = this candidate's mid >= (100/N - 10) cents, inside the band.
+        # Price is the fallback proxy for polling share -- the format doc tells
+        # the analyst to refine N against actual polls.
+        whole = full_by_event.get(m.get("event_ticker")) or [m]
+        competitive = [x for x in whole if _mid(x) >= 0.10]
+        n = max(len(competitive), 1)
+        thr = (100.0 / n) - 10.0
+        my_mid = _mid(m) * 100
+        base["viability"] = {
+            "competitive_n": n,
+            "threshold_cents": round(thr, 1),
+            "mid_cents": round(my_mid, 1),
+            "viable": bool(my_mid >= thr),
+            "note": "price is a polling-share proxy; refine N against polls",
+        }
+
         # Full coverage is the point, so nothing is dropped -- but most of a
         # primary board is dust: on the first live sweep 694 of 928 in-scope
         # rows had zero 24h volume. `tradeable` says whether there is anything
@@ -274,6 +315,9 @@ def main() -> int:
                 log.debug("trades %s: %s", base["id"], e)
         else:
             skipped_trades += 1
+
+        base["motion"] = S.motion(hist_by_ticker.get(base["id"]),
+                                  current_mid=_mid(m), thresholds=t)
 
         base["consolidation"] = [c for c in (cons, pcons) if c]
         if base["consolidation"]:
@@ -373,29 +417,44 @@ def main() -> int:
         out.write_text(json.dumps(pack, indent=1), encoding="utf-8")
         print(f"wrote {out.name} ({out.stat().st_size/1000:.0f} KB, {len(races)} races)")
 
-        # Per-date slices. The full pack is >1MB because full coverage means
-        # ~900 rows; the analyst works one settlement date at a time, so give it
-        # a file the size of its actual job. Coverage is unchanged -- these are
-        # views of the same rows, and the full pack stays published.
-        for d_iso in sorted(batches):
-            slice_rows = [r for r in races if r["resolution_date"] == d_iso]
-            sp = base_dir / f"scout-pack-{d_iso}.json"
-            sp.write_text(json.dumps({
+        # Slices: per-date AND per-state views of the same rows -- the analyst
+        # works either a settlement date or a state, and should fetch a file the
+        # size of its job, not the 1.2MB full pack. Every slice carries its own
+        # filtered band-excluded appendix so the exclusions travel with the view.
+        def write_slice(name: str, key: str, value: str, slice_rows: list, appx: list):
+            (base_dir / name).write_text(json.dumps({
                 **{k: pack[k] for k in ("schema", "generated_at", "generated_at_pt",
                                         "bankroll_for_sizing_usd", "read_me", "scope", "fec")},
-                "batch_date": d_iso,
+                key: value,
                 "race_count": len(slice_rows),
                 "tradeable_count": sum(1 for r in slice_rows if r.get("tradeable")),
                 "consolidation_alerts": [c for c in pack["consolidation_alerts"]
-                                         if any(r["id"] == c["id"] and
-                                                r["resolution_date"] == d_iso
-                                                for r in slice_rows)],
+                                         if any(r["id"] == c["id"] for r in slice_rows)],
                 "races": slice_rows,
+                "appendix_band_excluded": appx,
             }, indent=1), encoding="utf-8")
-        print(f"wrote {len(batches)} per-date slices "
-              f"(largest {max(len(json.dumps([r for r in races if r['resolution_date']==d])) for d in batches)/1000:.0f} KB)")
 
-    topic = os.environ.get("NTFY_TOPIC", "")
+        for d_iso in sorted(batches):
+            write_slice(f"scout-pack-{d_iso}.json", "batch_date", d_iso,
+                        [r for r in races if r["resolution_date"] == d_iso],
+                        [a for a in appendix if a.get("resolution_date") == d_iso])
+
+        def state_of(row):
+            src = row.get("resolution_date_source") or ""
+            if ":" in src:
+                return src.rsplit(":", 1)[-1]
+            return S.detect_state(f"{row.get('title','')} {row.get('id','')}")
+        states = sorted({st for st in (state_of(r) for r in races) if st})
+        for st_code in states:
+            write_slice(f"scout-pack-{st_code}.json", "state", st_code,
+                        [r for r in races if state_of(r) == st_code],
+                        [a for a in appendix if a.get("state") == st_code])
+        print(f"wrote {len(batches)} date slices + {len(states)} state slices")
+
+    # B5 (2026-07-29): consolidation no longer pushes to the phone -- it stays
+    # in the pack, and the whale-book consensus grades own the push path now
+    # (STRONG/HEAVY only). Single large prints in the 30-min poll are unchanged.
+    topic = ""
     if consolidations and topic:
         lines = [f"- {r['candidate'] or r['title'][:40]}: "
                  f"{', '.join(c['kind'] for c in r['consolidation'])}"

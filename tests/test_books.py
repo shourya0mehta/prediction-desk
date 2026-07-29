@@ -1274,3 +1274,138 @@ def test_federal_races_do_spend_a_call():
     assert out["fec_status"] == "fetched"
     assert out["cash_on_hand"] == 97762.68
     assert c.calls == 1
+
+
+# ================================================================ round 7
+
+def test_no_positions_mark_against_their_own_exit_book():
+    """A NO holder exits by selling NO -- the walk of the implied YES asks.
+
+    The old code complemented the YES sell walk, which prices the NO exit off
+    the NO *ask* (what buying more costs) and overstated NO marks by roughly
+    the spread plus slippage -- ~$24 across the two live NO positions.
+    """
+    from desk.core.compare import mark_positions
+    snap = {"venue_data": {"kalshi": {
+        "bid": "0.27", "ask": "0.34", "mid": "0.305",
+        "executable": {"thin": False,
+                       "sell_clip_vwap": {"vwap": "0.2650"},   # YES exit
+                       "buy_clip_vwap": {"vwap": "0.3550"}},   # -> NO exit = .645
+    }}}
+    ledger = [
+        {"market_id": "m", "venue": "kalshi", "side": "NO", "shares": 140,
+         "avg_price_cents": 71.62, "cost_dollars_fee_incl": 102.27},
+        {"market_id": "m", "venue": "kalshi", "side": "YES", "shares": 140,
+         "avg_price_cents": 50.0},
+    ]
+    marked, _ = mark_positions(ledger, {"m": snap})
+    no_row, yes_row = marked[0], marked[1]
+    assert no_row["mark"] == "0.6450", "NO mark = 1 - buy walk, not 1 - sell walk"
+    assert yes_row["mark"] == "0.2650", "YES mark = the sell walk"
+    # Old behaviour would have said 1 - 0.2650 = 0.7350 -- 9c high here.
+
+
+def test_cost_basis_uses_the_ledger_fee_inclusive_figure():
+    from desk.core.compare import mark_positions
+    snap = {"venue_data": {"kalshi": {
+        "mid": "0.30", "bid": "0.29", "ask": "0.31",
+        "executable": {"thin": False, "sell_clip_vwap": {"vwap": "0.29"},
+                       "buy_clip_vwap": {"vwap": "0.31"}}}}}
+    ledger = [{"market_id": "m", "venue": "kalshi", "side": "YES", "shares": 140,
+               "avg_price_cents": 71.62, "cost_dollars_fee_incl": 102.27}]
+    marked, _ = mark_positions(ledger, {"m": snap})
+    assert marked[0]["cost_basis"] == "102.27", "ledger figure, not shares x entry (100.27)"
+
+
+def test_cumulative_alert_title_shows_baseline_to_current():
+    """Live bug: '84->84 (+8c)' -- the current price printed twice."""
+    from desk.core.alerts import move_alert
+    t = {"cumulative_move_cents": 7, "single_poll_move_cents": 4}
+    mkt = {"id": "x", "label": "WI-Gov Hong", "mid": "0.84",
+           "_prev_mid": "0.84",          # last poll == current (no poll move)
+           "_baseline_mid": "0.76"}      # the brief baseline the delta is vs
+    a = move_alert(mkt, +8.0, t, cumulative=True)
+    assert "76->84" in a.title, a.title
+    assert "84->84" not in a.title
+
+
+def test_single_poll_alert_title_still_uses_prev_poll():
+    from desk.core.alerts import move_alert
+    t = {"single_poll_move_cents": 4, "single_poll_move_high_cents": 8}
+    mkt = {"id": "x", "label": "MI-Sen", "mid": "0.55", "_prev_mid": "0.62",
+           "_baseline_mid": "0.70"}
+    a = move_alert(mkt, -7.0, t, cumulative=False)
+    assert "62->55" in a.title
+
+
+def test_viability_thresholds():
+    """viable = mid >= (100/N - 10), N = candidates priced >= 10c."""
+    n2 = (100 / 2) - 10   # 40 in a two-way
+    n3 = (100 / 3) - 10   # ~23.3 in a three-way
+    assert n2 == 40
+    assert round(n3, 1) == 23.3
+    assert 39.9 < n2 <= 40 and (25 >= n3)
+
+
+def test_motion_flags_a_diverging_mid_and_admits_missing_history():
+    from desk.core.scout import motion
+    hist = [["t1", 0.60], ["t2", 0.61], ["t3", 0.60], ["t4", 0.61]]
+    m = motion(hist, current_mid=0.66, thresholds={})
+    assert m["available"] and m["in_motion"] is True
+    assert m["deviation_cents"] > 2
+    calm = motion(hist, current_mid=0.605, thresholds={})
+    assert calm["in_motion"] is False
+    none = motion(None, current_mid=0.60)
+    assert none["available"] is False and none["in_motion"] is None
+
+
+def test_feed_errors_do_not_page_but_hard_errors_do():
+    errs = ["feed crystal-ball: HTTP 403", "kalshi orderbook X: HTTP 500"]
+    hard = [e for e in errs if not e.startswith("feed ")]
+    assert hard == ["kalshi orderbook X: HTTP 500"]
+
+
+def test_briefs_relay_republishes_and_advances_cursor(monkeypatch):
+    """E2: a brief POSTed to the ntfy topic lands in the gist with an index."""
+    import json as _json
+    import httpx
+    from desk.core import relay as R
+
+    ndjson = "\n".join([
+        _json.dumps({"event": "open", "id": "x1", "time": 1753900000}),
+        _json.dumps({"event": "message", "id": "m1", "time": 1753900100,
+                     "title": "Morning brief", "message": "# Brief\n" + ("word " * 100)}),
+        _json.dumps({"event": "message", "id": "m2", "time": 1753900200,
+                     "message": "ping"}),  # too short -- not a brief
+    ])
+
+    class HTTP:
+        def get(self, url, params=None, timeout=None):
+            return httpx.Response(200, text=ndjson, request=httpx.Request("GET", url))
+
+    written_files = {}
+    class G:
+        def read(self, name):
+            return None
+        def write(self, files):
+            written_files.update(files)
+
+    state = {}
+    out = R.relay(G(), state, "desk-briefs-test", HTTP())
+    assert len(out) == 1 and out[0].startswith("brief-")
+    assert out[0] in written_files
+    assert "briefs-index.json" in written_files
+    idx = _json.loads(written_files["briefs-index.json"])
+    assert idx["briefs"][0]["title"] == "Morning brief"
+    assert state["briefs_relay_since"] == "m2", "cursor advances past non-briefs too"
+
+
+def test_briefs_relay_survives_topic_outage():
+    import httpx
+    from desk.core import relay as R
+
+    class HTTP:
+        def get(self, url, params=None, timeout=None):
+            raise httpx.ConnectError("blocked")
+
+    assert R.relay(None, {}, "desk-briefs-test", HTTP()) == []

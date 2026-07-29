@@ -1,0 +1,54 @@
+name: update-queue
+
+# Append one line to standing-queue.md from a phone: GitHub app -> Actions ->
+# update-queue -> Run workflow -> type the idea. Uses the gist-scoped token.
+on:
+  workflow_dispatch:
+    inputs:
+      entry:
+        description: "The idea, one line (price + gate if any). Date is stamped automatically."
+        required: true
+
+concurrency:
+  group: desk-gist-write
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  append:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install httpx pyyaml
+      - name: Append to the queue
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          ENTRY: ${{ github.event.inputs.entry }}
+        run: |
+          python - <<'PY'
+          import os, sys, httpx
+          sys.path.insert(0, ".")
+          from desk.core.state import Gist, stamp
+          entry = (os.environ.get("ENTRY") or "").strip()
+          if not entry:
+              sys.exit("empty entry")
+          g = Gist(os.environ["GIST_ID"], os.environ["GIST_TOKEN"])
+          q = g.read("standing-queue.md") or "# Standing queue\n"
+          q = q.rstrip() + f"\n- [{stamp()['pt'][:10]}] {entry}\n"
+          g.write({"standing-queue.md": q})
+          topic = os.environ.get("NTFY_TOPIC")
+          if topic:
+              httpx.post(f"https://ntfy.sh/{topic}",
+                         content=f"Queued: {entry}".encode(),
+                         headers={"Title": "Standing queue updated", "Priority": "2",
+                                  "Tags": "memo"}, timeout=15)
+          print("appended:", entry)
+          PY
