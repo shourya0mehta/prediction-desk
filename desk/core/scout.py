@@ -164,6 +164,24 @@ def classify(market: dict, event: dict | None = None) -> str:
     return "other"
 
 
+OFFICE_PATTERNS = (
+    ("senate", re.compile(r"\bsenate\b|\bsenator\b", re.I)),
+    ("house", re.compile(r"\bhouse\b|\bcongress|\b[A-Z]{2}-\d{2}\b", re.I)),
+    ("governor", re.compile(r"\bgovernor\b|gubernatorial", re.I)),
+    ("attorney_general", re.compile(r"\battorney general\b", re.I)),
+    ("secretary_of_state", re.compile(r"\bsecretary of state\b", re.I)),
+    ("mayor", re.compile(r"\bmayor\b", re.I)),
+)
+
+
+def detect_office(text: str) -> str | None:
+    """The office a race is for. Only senate/house are covered by the FEC."""
+    for name, pat in OFFICE_PATTERNS:
+        if pat.search(text or ""):
+            return name
+    return None
+
+
 def detect_state(text: str) -> str | None:
     low = (text or "").lower()
     for name, code in STATE_NAMES.items():

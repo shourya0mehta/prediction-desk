@@ -226,8 +226,12 @@ def main() -> int:
             base["fee_100_contracts_usd"] = str(fee)
             base["breakeven_with_fee"] = str((ask + fee / 100).quantize(Decimal("0.0001")))
 
-        # FEC money for this candidate (cached, degrades to unavailable).
-        money = fec.totals(base["candidate"]) if base["candidate"] else {"fec_status": "no_name"}
+        # FEC money, with the race's office so the client can skip non-federal
+        # races (governors file with the state) and reject surname mismatches.
+        office = S.detect_office(f"{base['title']} {m.get('yes_sub_title') or ''}")
+        base["office"] = office
+        money = (fec.totals(base["candidate"], office) if base["candidate"]
+                 else {"fec_status": "no_name"})
         base["fec"] = money
 
         # Dominant favourite against a fragmented field -- the WA top-two shape,

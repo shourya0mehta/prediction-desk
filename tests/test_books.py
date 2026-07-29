@@ -1167,3 +1167,110 @@ def test_quarter_kelly_sizes_against_the_thousand_dollar_bankroll():
     p_bad = 0.40
     kelly_bad = (p_bad * b - (1 - p_bad)) / b
     assert kelly_bad < 0
+
+
+# ------------------------------------------------------- FEC identity guards
+
+def test_fec_refuses_a_surname_mismatch():
+    """q='John James' returned 'JOHNSON, JAMES MICHAEL' with $20.9M raised.
+
+    Reported against the Michigan governor's race that is a $21M number attached
+    to the wrong human. A missing figure prompts a lookup; a confident wrong one
+    gets quoted in a brief and sized against.
+    """
+    from desk.pollers.fec import _pick_match
+    rows = [{"name": "JOHNSON, JAMES MICHAEL", "office_full": "House",
+             "receipts": 20976864.33}]
+    assert _pick_match("John James", rows, None) is None
+
+
+def test_fec_accepts_a_genuine_surname_match():
+    from desk.pollers.fec import _pick_match
+    rows = [{"name": "EL-SAYED, ABDUL", "office_full": "Senate", "receipts": 14528335.93}]
+    hit = _pick_match("Abdul El-Sayed", rows, "senate")
+    assert hit is not None
+    assert hit["receipts"] == 14528335.93
+
+
+def test_office_mismatch_is_flagged_not_discarded():
+    """A sitting House member running for the Senate has a House committee.
+
+    That money is context, not an error, so it is returned flagged rather than
+    thrown away -- Rashida Tlaib on the Michigan Senate board is exactly this.
+    """
+    from desk.pollers.fec import _pick_match
+    rows = [{"name": "TLAIB, RASHIDA", "office_full": "House"}]
+    hit = _pick_match("Rashida Tlaib", rows, "senate")
+    assert hit is not None and hit["_office_mismatch"] is True
+
+
+def test_compound_surnames_are_not_refused():
+    """The FEC keeps the whole compound; Kalshi's last token is only half of it.
+
+    Strict equality refused three genuine matches on the first live run.
+    """
+    from desk.pollers.fec import _pick_match
+    assert _pick_match("Marie Gluesenkamp Perez",
+                       [{"name": "GLUESENKAMP PEREZ, MARIE", "office_full": "House"}],
+                       "house") is not None
+    assert _pick_match("Kristen McDonald Rivet",
+                       [{"name": "MCDONALD RIVET, KRISTEN", "office_full": "House"}],
+                       "house") is not None
+
+
+def test_a_bare_first_name_is_never_matched():
+    """'Wayne' and 'Virginia' each matched three unrelated filers live."""
+    from desk.pollers.fec import _pick_match
+    assert _pick_match("Wayne", [{"name": "KINSEL, WAYNE CHARLES",
+                                  "office_full": "House"}], "house") is None
+    assert _pick_match("Virginia", [{"name": "FOXX, VIRGINIA ANN",
+                                     "office_full": "House"}], "house") is None
+
+
+def test_surname_parsing_handles_fec_and_kalshi_formats():
+    from desk.pollers.fec import surname_of
+    assert surname_of("EL-SAYED, ABDUL") == "el-sayed"
+    assert surname_of("Abdul El-Sayed") == "el-sayed"
+    assert surname_of("MARKEY, EDWARD SEN.") == "markey"
+    # Kalshi writes ordinals as digits: "Hartzell Gray 3rd"
+    assert surname_of("Hartzell Gray 3rd") == "gray"
+    assert surname_of("Robert Smith Jr") == "smith"
+    assert surname_of("") == ""
+
+
+def test_state_races_never_spend_a_call_and_are_labelled():
+    """The FEC covers federal candidates only.
+
+    Three of the owner's positions are gubernatorial; a blank there reads as
+    'raised nothing' unless it says why it is blank.
+    """
+    from desk.pollers.fec import FECClient
+
+    class Boom:
+        def get(self, *a, **k):
+            raise AssertionError("must not call the FEC for a non-federal race")
+
+    c = FECClient(Boom(), "key")
+    out = c.totals("Mike Lindell", "governor")
+    assert out["fec_status"] == "not_federal_race"
+    assert "state" in out["note"]
+    assert c.calls == 0
+
+
+def test_federal_races_do_spend_a_call():
+    from desk.pollers.fec import FECClient
+    import httpx
+
+    class C:
+        def get(self, url, params=None):
+            return httpx.Response(200, json={"results": [
+                {"name": "BUSH, CORI", "office_full": "House",
+                 "receipts": 1306727.18, "cash_on_hand_end_period": 97762.68,
+                 "candidate_id": "H6MO01234"}]},
+                request=httpx.Request("GET", url))
+
+    c = FECClient(C(), "key")
+    out = c.totals("Cori Bush", "house")
+    assert out["fec_status"] == "fetched"
+    assert out["cash_on_hand"] == 97762.68
+    assert c.calls == 1
