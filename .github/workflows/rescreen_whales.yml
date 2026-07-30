@@ -1,0 +1,46 @@
+name: whale-rescreen
+
+# Monthly re-admission pass, first Sunday ~1pm PT. Standard cron ORs
+# day-of-month with day-of-week, so this runs daily on the 1st-7th and the job
+# guard keeps only Sunday. Proposals only -- nothing is applied without the
+# owner's approval.
+on:
+  schedule:
+    - cron: "0 20 1-7 * *"
+  workflow_dispatch:
+
+concurrency:
+  group: desk-gist-write
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rescreen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: First-Sunday guard
+        id: guard
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(date -u +%u)" = "7" ]; then
+            echo "run=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "not the first Sunday; skipping"
+          fi
+      - uses: actions/setup-python@v5
+        if: steps.guard.outputs.run == 'yes'
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+        if: steps.guard.outputs.run == 'yes'
+      - name: Rescreen
+        if: steps.guard.outputs.run == 'yes'
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python tools/screen_whales.py --rescreen

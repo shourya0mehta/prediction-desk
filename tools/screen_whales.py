@@ -24,6 +24,7 @@ printed for the owner's one-word approval. Nothing is written anywhere.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -176,8 +177,101 @@ def screen(client, alias, wallet, source) -> dict:
     }
 
 
+def fresh_leaderboard_candidates(client, known: set) -> list:
+    """New wallets from the current profit leaderboards worth screening."""
+    out, seen = [], set()
+    for window in ("30d", "all"):
+        try:
+            rows = client.get("https://lb-api.polymarket.com/profit",
+                              params={"window": window, "limit": 50}).json()
+        except httpx.HTTPError:
+            continue
+        for r in rows or []:
+            w = (r.get("proxyWallet") or "").lower()
+            if not w or w in known or w in seen:
+                continue
+            seen.add(w)
+            out.append((r.get("name") or w[:10], w, f"leaderboard-{window}"))
+        time.sleep(0.3)
+    return out
+
+
+def rescreen() -> int:
+    """Monthly re-admission pass: current roster + fresh leaderboard blood.
+
+    Prints proposed changes and writes whale-rescreen-YYYY-MM.md to the gist
+    (mirrored to Pages). NEVER applies anything -- roster changes remain a
+    one-word owner approval, exactly like the original screen.
+    """
+    import yaml
+    from desk.core.state import Gist, stamp
+
+    client = httpx.Client(timeout=30, follow_redirects=True)
+    gist = Gist(os.environ.get("GIST_ID", ""), os.environ.get("GIST_TOKEN", ""))
+    roster = yaml.safe_load(gist.read("whales.yaml") or "[]") or []
+    known = {(w.get("wallet") or "").lower() for w in roster}
+
+    lines = [f"# Whale rescreen — {stamp()['pt'][:10]}", "",
+             "Admission criteria re-run against live data. Proposals only — "
+             "nothing here is applied without owner approval.", ""]
+
+    lines.append("## Current roster drift")
+    proposals = 0
+    for w in roster:
+        r = screen(client, w.get("alias") or "?", w.get("wallet"), "roster")
+        fails = [k for k, v in r["passes"].items() if not v]
+        drift = ""
+        if w.get("alert") and fails and w.get("tier") != "core":
+            drift = f" -> PROPOSE demote to non-alerting (fails: {', '.join(fails)})"
+            proposals += 1
+        if not w.get("alert") and not fails:
+            drift = " -> PROPOSE promote to alerting (all criteria pass)"
+            proposals += 1
+        lines.append(f"- {r['alias']}: pol {max(r['political_share_book'], r['political_share_recent_trades'])}%, "
+                     f"30d {r['pnl_30d']}, life {r['pnl_lifetime']}, "
+                     f"res {r['resolved_trades']}, ten {r['tenure_months']}mo{drift}")
+        time.sleep(0.5)
+
+    lines.append("")
+    lines.append("## Fresh leaderboard candidates (screened, political tape >= 40%)")
+    fresh = fresh_leaderboard_candidates(client, known)
+    admits = 0
+    for alias, wallet, source in fresh[:25]:
+        r = screen(client, alias, wallet, source)
+        if max(r["political_share_book"], r["political_share_recent_trades"]) < 40:
+            continue
+        verdict = "PROPOSE ADMIT" if r["admit"] else                   f"reject ({', '.join(k for k, v in r['passes'].items() if not v)})"
+        if r["admit"]:
+            admits += 1
+            proposals += 1
+        lines.append(f"- {alias} `{wallet}`: pol {max(r['political_share_book'], r['political_share_recent_trades'])}%, "
+                     f"30d {r['pnl_30d']}, life {r['pnl_lifetime']}, res {r['resolved_trades']}, "
+                     f"ten {r['tenure_months']}mo -> **{verdict}**")
+        time.sleep(0.5)
+    if not any(l.startswith("- ") for l in lines[lines.index("## Fresh leaderboard candidates (screened, political tape >= 40%)"):]):
+        lines.append("- none met the political-share screen this month")
+
+    report = "\n".join(lines) + "\n"
+    name = f"whale-rescreen-{stamp()['pt'][:7]}.md"
+    gist.write({name: report})
+    print(report)
+    print(f"written to gist as {name} ({proposals} proposal(s))")
+
+    topic = os.environ.get("NTFY_TOPIC", "")
+    if topic:
+        httpx.post(f"https://ntfy.sh/{topic}",
+                   content=(f"{proposals} proposed roster change(s), {admits} new admit(s). "
+                            f"Full evidence: {name} on the mirror. Reply 'approve rescreen' "
+                            f"to apply.").encode(),
+                   headers={"Title": "Monthly whale rescreen ready", "Priority": "3",
+                            "Tags": "whale"}, timeout=20)
+    return 0
+
+
 def main() -> int:
-    wallets = sys.argv[1:]
+    if "--rescreen" in sys.argv:
+        return rescreen()
+    wallets = [a for a in sys.argv[1:] if not a.startswith("--")]
     todo = ([(w[:10], w, "cli") for w in wallets] if wallets else CANDIDATES)
     client = httpx.Client(timeout=30, follow_redirects=True)
 

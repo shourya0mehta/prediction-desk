@@ -164,7 +164,7 @@ def build(root: str, prefix: str, snapshot: dict, universe: list | None,
 
     # Every primer, plus the index that names them -- and every relayed brief.
     for name, content in (gist._load() or {}).items():
-        if name.endswith(".md") and (name.startswith("primer-") or name.startswith("brief-2")):
+        if name.endswith(".md") and (name.startswith("primer-") or name.startswith("brief-2") or name.startswith("whale-rescreen-")):
             put(name, content)
 
     # An index page, so a stray visitor to the prefix sees something honest

@@ -1409,3 +1409,42 @@ def test_briefs_relay_survives_topic_outage():
             raise httpx.ConnectError("blocked")
 
     assert R.relay(None, {}, "desk-briefs-test", HTTP()) == []
+
+
+# ------------------------------------ consensus grades (roster-recalibrated)
+
+CORES = {"Domer", "aenews2"}
+ALERTING = {"Domer", "aenews2", "risk-manager", "anon-23d8", "Q96s"}
+
+
+def _adds(*pairs):
+    return [{"alias": a, "added_usd": usd, "before": 0, "after": usd}
+            for a, usd in pairs]
+
+
+def test_strong_needs_two_alerting_and_five_k():
+    from tools.whale_book import grade
+    t = {}
+    assert grade(_adds(("risk-manager", 3000), ("anon-23d8", 2500)),
+                 t, CORES, ALERTING) == "STRONG"          # 2 alerting, $5.5k
+    assert grade(_adds(("risk-manager", 2000), ("anon-23d8", 2000)),
+                 t, CORES, ALERTING) == "WATCH"           # 2 alerting, only $4k
+    # Two CONTEXT wallets cannot form a STRONG whatever the dollars.
+    assert grade(_adds(("wan123", 90000), ("debased", 90000)),
+                 t, CORES, ALERTING) == "WATCH"
+
+
+def test_heavy_fires_on_three_alerting_or_both_cores_plus_third():
+    from tools.whale_book import grade
+    t = {}
+    assert grade(_adds(("Domer", 100), ("risk-manager", 100), ("Q96s", 100)),
+                 t, CORES, ALERTING) == "HEAVY"           # 3 alerting, $ irrelevant
+    assert grade(_adds(("Domer", 50), ("aenews2", 50), ("wan123", 10)),
+                 t, CORES, ALERTING) == "HEAVY"           # both cores + any third
+    assert grade(_adds(("Domer", 50), ("aenews2", 50)),
+                 t, CORES, ALERTING) == "WATCH"           # both cores alone: no third
+
+
+def test_single_wallet_never_grades():
+    from tools.whale_book import grade
+    assert grade(_adds(("Domer", 500000)), {}, CORES, ALERTING) is None

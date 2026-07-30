@@ -7,12 +7,14 @@
 Runs daily from the poll workflow. The mirror picks whale-book.json up from the
 gist on every poll, so the file never 404s between builds.
 
-Consensus grades (all knobs in thresholds.yaml):
-  WATCH   2 wallets aligned on one side of one market       -> pack only
-  STRONG  3-4 aligned, or >= $10k combined                  -> ntfy push,
+Consensus grades, recalibrated 2026-07-29 to the approved 10-wallet roster
+(5 alerting) -- the original bars were written for a ~25-wallet book and could
+near-never fire on this one. All knobs in thresholds.yaml:
+  WATCH   2 roster wallets aligned on one side               -> pack only
+  STRONG  >= 2 of the ALERTING set aligned, >= $5k combined  -> ntfy push,
           mandatory next-brief coverage
-  HEAVY   >= 5 aligned, or >= $50k combined incl >= 2 core  -> high-priority
-          push, auto-added to standing-queue.md
+  HEAVY   >= 3 alerting aligned, OR both cores plus any      -> high-priority
+          third roster wallet regardless of dollars             push + queue
 
 "Aligned" means net-ADDED dollar value to the same side inside the window --
 holding still is conviction, but only new money is a signal. Alert bodies name
@@ -48,11 +50,10 @@ DATA = "https://data-api.polymarket.com"
 
 DEFAULTS = {
     "consensus_watch_wallets": 2,
-    "consensus_strong_wallets": 3,
-    "consensus_strong_usd": 10_000,
-    "consensus_heavy_wallets": 5,
-    "consensus_heavy_usd": 50_000,
-    "consensus_heavy_core_min": 2,
+    "consensus_strong_alerting": 2,
+    "consensus_strong_usd": 5_000,
+    "consensus_heavy_alerting": 3,
+    "consensus_heavy_core_min": 2,   # both cores + any third fires HEAVY
     "consensus_window_days": 7,
 }
 
@@ -72,16 +73,25 @@ def positions(client, wallet):
         return None
 
 
-def grade(aligned: list, t: dict, core_aliases: set) -> str | None:
-    """WATCH | STRONG | HEAVY for one (market, side) group of net-adders."""
+def grade(aligned: list, t: dict, core_aliases: set,
+          alerting_aliases: set) -> str | None:
+    """WATCH | STRONG | HEAVY for one (market, side) group of net-adders.
+
+    Alignment among the ALERTING set is what escalates -- context wallets
+    (polled, alert:false) count toward WATCH and toward the "any third" leg of
+    HEAVY, but cannot form a STRONG on their own.
+    """
     n = len(aligned)
-    usd = sum(a["added_usd"] for a in aligned)
+    alerting = [a for a in aligned if a["alias"] in alerting_aliases]
+    usd = sum(a["added_usd"] for a in alerting)
     cores = sum(1 for a in aligned if a["alias"] in core_aliases)
-    if (n >= int(cfg(t, "consensus_heavy_wallets"))
-            or (usd >= float(cfg(t, "consensus_heavy_usd"))
-                and cores >= int(cfg(t, "consensus_heavy_core_min")))):
+
+    if len(alerting) >= int(cfg(t, "consensus_heavy_alerting")):
         return "HEAVY"
-    if n >= int(cfg(t, "consensus_strong_wallets")) or usd >= float(cfg(t, "consensus_strong_usd")):
+    if cores >= int(cfg(t, "consensus_heavy_core_min")) and n >= cores + 1:
+        return "HEAVY"          # both cores plus any third, dollars irrelevant
+    if (len(alerting) >= int(cfg(t, "consensus_strong_alerting"))
+            and usd >= float(cfg(t, "consensus_strong_usd"))):
         return "STRONG"
     if n >= int(cfg(t, "consensus_watch_wallets")):
         return "WATCH"
@@ -108,6 +118,8 @@ def main() -> int:
         return 1
 
     core_aliases = {w.get("alias") for w in roster if w.get("tier") == "core"}
+    alerting_aliases = {w.get("alias") for w in roster
+                        if w.get("alert", True) and w.get("active", True)}
     window_days = int(cfg(t, "consensus_window_days"))
     now_iso = now_utc().isoformat()
 
@@ -203,7 +215,7 @@ def main() -> int:
         st.setdefault("window_adds", {})[key] = list(merged.values())
 
         aligned = [m for m in merged.values() if m["added_usd"] > 0]
-        g = grade(aligned, t, core_aliases)
+        g = grade(aligned, t, core_aliases, alerting_aliases)
         if g:
             consensus.append({
                 "grade": g, "market": grp["market"], "side": grp["side"],

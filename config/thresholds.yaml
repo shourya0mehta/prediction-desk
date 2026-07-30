@@ -68,12 +68,13 @@ max_trade_lookups: 250            # per run; overflow reported, never silent
 
 # --- whale consensus grades (whale-book.json, daily) --------------------
 # "aligned" = net-ADDED dollars to the same side of the same market in-window.
-consensus_watch_wallets: 2        # WATCH: pack-only
-consensus_strong_wallets: 3       # STRONG: push + mandatory next-brief coverage
-consensus_strong_usd: 10000       #   ...or by combined dollars
-consensus_heavy_wallets: 5        # HEAVY: high-priority push + standing-queue
-consensus_heavy_usd: 50000        #   ...or dollars, if enough core wallets agree
-consensus_heavy_core_min: 2
+# Recalibrated 2026-07-29 to the approved roster (10 polled, 5 alerting): the
+# original bars were sized for ~25 wallets and could near-never fire on 5.
+consensus_watch_wallets: 2        # WATCH: any 2 roster wallets, pack-only
+consensus_strong_alerting: 2      # STRONG: >=2 of the ALERTING set, and...
+consensus_strong_usd: 5000        #   ...>= $5k combined among the alerting adders
+consensus_heavy_alerting: 3       # HEAVY: >=3 alerting aligned, OR
+consensus_heavy_core_min: 2       #   both cores + any third wallet, $-irrelevant
 consensus_window_days: 7
 
 # --- motion -------------------------------------------------------------
