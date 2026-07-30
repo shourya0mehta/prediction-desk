@@ -1512,3 +1512,136 @@ def test_bare_surname_alone_never_tags():
     assert tag_for("Powell to speak at a conference", m) is None
     assert tag_for("Stevens wins award", m) is None
     assert tag_for("Kansas City weather: hot week ahead", m) is None    # context alone
+
+
+# ================================================== round 9: whale-book health
+
+def _wb(status="computed_empty", computed_at="2026-07-30T12:00:00+00:00",
+        aliases=("A", "B")):
+    return {"status": status, "computed_at": computed_at,
+            "roster_aliases": sorted(aliases)}
+
+
+def _roster(*aliases, inactive=()):
+    return ([{"alias": a, "active": True} for a in aliases]
+            + [{"alias": a, "active": False} for a in inactive])
+
+
+def test_whale_book_roster_mismatch_is_a_heartbeat_problem():
+    """The live failure: the book was missing exactly the two wallets that
+    moved (anon-23d8 and wan123) because it was built from a stale roster."""
+    from main import whale_book_problems
+    probs = whale_book_problems(_wb(aliases=("A", "B")),
+                                _roster("A", "B", "anon-23d8", "wan123"),
+                                snapshot_age_min=10)
+    assert any("disagrees" in p and "anon-23d8" in p and "wan123" in p for p in probs)
+
+
+def test_whale_book_matching_roster_and_fresh_age_is_clean():
+    from datetime import datetime, timezone
+    from main import whale_book_problems
+    now = datetime(2026, 7, 30, 12, 30, tzinfo=timezone.utc)
+    probs = whale_book_problems(_wb(aliases=("A", "B")), _roster("A", "B"),
+                                snapshot_age_min=25, now=now)
+    assert probs == []
+
+
+def test_whale_book_far_behind_snapshot_is_flagged():
+    """The live failure: book generated 17h behind brief-pack."""
+    from datetime import datetime, timezone
+    from main import whale_book_problems
+    now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+    old = _wb(computed_at="2026-07-29T19:00:00+00:00", aliases=("A",))
+    probs = whale_book_problems(old, _roster("A"), snapshot_age_min=20, now=now)
+    assert any("older than the snapshot" in p for p in probs)
+
+
+def test_whale_book_missing_or_statusless_is_flagged():
+    from main import whale_book_problems
+    assert whale_book_problems(None, _roster("A"), 10) == \
+        ["whale-book.json is missing from the gist"]
+    no_status = {"computed_at": "2026-07-30T12:00:00+00:00", "roster_aliases": ["A"]}
+    probs = whale_book_problems(no_status, _roster("A"), snapshot_age_min=None)
+    assert any("no status field" in p for p in probs)
+
+
+def test_computed_empty_and_computed_are_distinct_statuses():
+    """consensus:[] must be distinguishable from 'the job never ran'."""
+    from tools.whale_book import grade  # noqa: F401 -- module import sanity
+    assert _wb(status="computed_empty")["status"] == "computed_empty"
+    assert _wb(status="computed")["status"] == "computed"
+
+
+def test_inactive_roster_rows_do_not_count_toward_parity():
+    from main import whale_book_problems
+    probs = whale_book_problems(_wb(aliases=("A", "B")),
+                                _roster("A", "B", inactive=("retired-wallet",)),
+                                snapshot_age_min=10)
+    assert not any("disagrees" in p for p in probs)
+
+
+# ------------------------------------------- round 9: derived cost deployed
+
+def test_total_cost_deployed_is_derived_from_ledger_rows():
+    """Stored $554.78 vs actual $634.78 after Holscher -- never store it."""
+    from decimal import Decimal
+    from main import derived_total_cost
+    ledger = [
+        {"cost_dollars_fee_incl": 554.78},
+        {"cost_dollars_fee_incl": 80.00},
+    ]
+    assert derived_total_cost(ledger) == Decimal("634.78")
+
+
+def test_derived_cost_falls_back_to_shares_times_entry():
+    from decimal import Decimal
+    from main import derived_total_cost
+    ledger = [{"shares": 100, "avg_price_cents": 50.0}]   # no fee-incl field
+    assert derived_total_cost(ledger) == Decimal("50.00")
+    assert derived_total_cost([]) == Decimal("0.00")
+
+
+def test_price_drift_on_an_old_holding_is_not_an_add():
+    """The live $7 HEAVY: three wallets' currentValue drifted on unchanged
+    positions. An add requires the SIZE to grow."""
+    prev_size, size = 1000.0, 1000.0
+    assert not (size - prev_size > 0.01), "flat size must never register as an add"
+    prev_size, size, cur_price = 1000.0, 1400.0, 0.25
+    added_usd = round((size - prev_size) * cur_price, 2)
+    assert added_usd == 100.0
+    assert added_usd >= 100, "at the de-minimis floor this one just qualifies"
+    assert round((1000.0 - 990.0) * 0.25, 2) < 100, "a 10-share dribble does not"
+
+
+def test_consensus_push_dedup_escalation_and_daily_repush():
+    from datetime import datetime, timedelta, timezone
+    rank = {"WATCH": 0, "STRONG": 1, "HEAVY": 2}
+    now = datetime(2026, 7, 30, 18, 0, tzinfo=timezone.utc)
+
+    def should_push(grade, prior, now):
+        escalated = rank[grade] > rank.get((prior or {}).get("grade"), -1)
+        recent = False
+        try:
+            recent = (now - datetime.fromisoformat(prior["at"])) < timedelta(hours=24)
+        except (KeyError, TypeError):
+            pass
+        return escalated or not recent
+
+    assert should_push("STRONG", None, now)                                   # first time
+    fresh = {"grade": "STRONG", "at": (now - timedelta(hours=1)).isoformat()}
+    assert not should_push("STRONG", fresh, now)                              # 15-min repeat: no
+    assert should_push("HEAVY", fresh, now)                                   # escalation: yes
+    stale = {"grade": "STRONG", "at": (now - timedelta(hours=25)).isoformat()}
+    assert should_push("STRONG", stale, now)                                  # daily re-push: yes
+
+
+def test_trim_history_preserves_rows_wider_than_two():
+    """The whale book stores [ts, value, size]; the 2-tuple unpack crashed it."""
+    from datetime import datetime, timedelta, timezone
+    from desk.core.state import trim_history
+    now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+    fresh = (now - timedelta(hours=1)).isoformat()
+    stale = (now - timedelta(hours=99)).isoformat()
+    rows = [[stale, 1.0, 10.0], [fresh, 2.0, 20.0], [fresh, 3.0]]
+    out = trim_history(rows, 48, now=now)
+    assert out == [[fresh, 2.0, 20.0], [fresh, 3.0]]

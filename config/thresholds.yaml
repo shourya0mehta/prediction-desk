@@ -79,3 +79,5 @@ consensus_window_days: 7
 
 # --- motion -------------------------------------------------------------
 in_motion_cents: 2                # |current mid - trailing 2h mean| to flag repricing
+consensus_min_add_usd: 100        # a size-add below this is noise, not conviction
+consensus_repush_hours: 24        # same consensus key+grade re-pushes at most daily

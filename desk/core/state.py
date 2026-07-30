@@ -201,17 +201,20 @@ def save_state(gist: Gist, state: dict) -> None:
 
 
 def trim_history(rows: list, hours: int, now: datetime | None = None) -> list:
+    """Drop rows older than the window. Rows are [ts, ...anything] -- the whole
+    row is preserved, because callers have grown wider rows (the whale book
+    stores [ts, value, size]) and a 2-tuple unpack here crashed its rebuild."""
     cutoff = (now or now_utc()) - timedelta(hours=hours)
     out = []
-    for ts, val in rows or []:
+    for row in rows or []:
         try:
-            when = datetime.fromisoformat(ts)
-        except (TypeError, ValueError):
+            when = datetime.fromisoformat(row[0])
+        except (TypeError, ValueError, IndexError):
             continue
         if when.tzinfo is None:
             when = when.replace(tzinfo=timezone.utc)
         if when >= cutoff:
-            out.append([ts, val])
+            out.append(list(row))
     return out
 
 

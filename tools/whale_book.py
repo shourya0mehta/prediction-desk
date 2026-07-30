@@ -16,10 +16,13 @@ near-never fire on this one. All knobs in thresholds.yaml:
   HEAVY   >= 3 alerting aligned, OR both cores plus any      -> high-priority
           third roster wallet regardless of dollars             push + queue
 
-"Aligned" means net-ADDED dollar value to the same side inside the window --
-holding still is conviction, but only new money is a signal. Alert bodies name
-wallets, sides, combined dollars and before->after position sizes, never bare
-share counts.
+"Aligned" means net-added SHARES to the same side inside the window -- an add
+is a size increase priced at the current market, never a value drift. The first
+value-based version graded a $7 price wiggle across three old holdings as a
+HEAVY; only new shares are new money. Adds under the de-minimis floor are
+ignored, and a consensus pushes once per grade level (escalation re-pushes,
+repetition does not) -- the book now rebuilds every poll, and without dedup one
+STRONG would page every 15 minutes.
 """
 
 from __future__ import annotations
@@ -55,6 +58,8 @@ DEFAULTS = {
     "consensus_heavy_alerting": 3,
     "consensus_heavy_core_min": 2,   # both cores + any third fires HEAVY
     "consensus_window_days": 7,
+    "consensus_min_add_usd": 100,    # de-minimis: smaller size-adds are noise
+    "consensus_repush_hours": 24,    # same key+grade re-pushes at most daily
 }
 
 
@@ -145,9 +150,14 @@ def main() -> int:
             seen_keys.add(key)
             val = float(p.get("currentValue") or 0)
             size = float(p.get("size") or 0)
+            cur_price = float(p.get("curPrice") or 0)
             series = trim_history(wh.get(key, []), 24 * window_days)
-            prev_val = series[-1][1] if series else None
-            series.append([now_iso, val])
+            last = series[-1] if series else None
+            prev_val = last[1] if last else None
+            # History rows are [ts, value, size]; older two-element rows from
+            # the value-based era carry no size and cannot prove an add.
+            prev_size = last[2] if last and len(last) > 2 else None
+            series.append([now_iso, val, size])
             wh[key] = trim_history(series, 24 * window_days)
 
             row = {
@@ -161,16 +171,28 @@ def main() -> int:
             book_rows.append(row)
 
             if prev_val is not None and abs(val - prev_val) >= 1:
-                deltas.append({**row, "value_before": round(prev_val, 2),
+                kind = ("add" if prev_size is not None and size - prev_size > 0.01
+                        else "trim" if prev_size is not None and prev_size - size > 0.01
+                        else "drift")
+                deltas.append({**row, "kind": kind,
+                               "value_before": round(prev_val, 2),
                                "value_after": round(val, 2),
-                               "delta_usd": round(val - prev_val, 2)})
-            if prev_val is not None and val - prev_val > 0:
-                adds_by_key.setdefault(key, {"market": row["market"],
-                                             "condition_id": row["condition_id"],
-                                             "side": row["side"], "adders": []})
-                adds_by_key[key]["adders"].append({
-                    "alias": alias, "added_usd": round(val - prev_val, 2),
-                    "before": round(prev_val, 2), "after": round(val, 2)})
+                               "delta_usd": round(val - prev_val, 2),
+                               "size_before": round(prev_size, 2) if prev_size is not None else None,
+                               "size_after": round(size, 2)})
+            # An ADD is a SIZE increase priced at the current market. Value
+            # deltas alone graded a $7 price drift as a HEAVY consensus.
+            if prev_size is not None and size - prev_size > 0.01:
+                added_usd = round((size - prev_size) * cur_price, 2)
+                if added_usd >= float(cfg(t, "consensus_min_add_usd")):
+                    adds_by_key.setdefault(key, {"market": row["market"],
+                                                 "condition_id": row["condition_id"],
+                                                 "side": row["side"], "adders": []})
+                    adds_by_key[key]["adders"].append({
+                        "alias": alias, "added_usd": added_usd,
+                        "shares_added": round(size - prev_size, 2),
+                        "before": round(prev_val, 2) if prev_val is not None else None,
+                        "after": round(val, 2)})
 
         # Exits: keys we held last time but not now.
         for key in list(wh.keys()):
@@ -200,9 +222,13 @@ def main() -> int:
         prior = (st.get("window_adds") or {}).get(key, [])
         cutoff = now_utc() - timedelta(days=window_days)
         merged: dict[str, dict] = {}
+        floor = float(cfg(t, "consensus_min_add_usd"))
         for a in prior:
             try:
-                if datetime.fromisoformat(a["ts"]) >= cutoff:
+                # Also migrates away the value-drift era: carried adds below the
+                # de-minimis floor (the $7 "HEAVY" inputs) are dropped here.
+                if datetime.fromisoformat(a["ts"]) >= cutoff \
+                        and float(a.get("added_usd") or 0) >= floor:
                     merged[a["alias"]] = {**a}
             except (KeyError, ValueError):
                 continue
@@ -230,9 +256,21 @@ def main() -> int:
                                   -c["combined_usd"]))
 
     book = {
-        "schema": "whale-book/1",
+        "schema": "whale-book/2",
         "generated_at": stamp()["utc"],
         "generated_at_pt": stamp()["pt"],
+        "computed_at": now_iso,
+        # An empty consensus that was genuinely COMPUTED is a different fact
+        # from a book the job never built. Absence of this field means an old
+        # or carried file; the heartbeat treats that as a problem.
+        "status": "computed" if consensus else "computed_empty",
+        # The roster as this build saw it -- the heartbeat compares this
+        # against whales.yaml so the book can never silently disagree with
+        # what the brief-pack shows.
+        "roster_aliases": sorted(w.get("alias") or "?" for w in roster
+                                 if w.get("active", True)),
+        "wallets_polled": len(books),
+        "wallets_unreachable": sum(1 for b in books if b.get("error")),
         "read_me": ("Full political books for the tracked roster, daily deltas, and a "
                     "consensus table. Consensus means multiple tracked wallets NET-ADDED "
                     "the same side of the same market inside the window. It is a prompt "
@@ -269,16 +307,27 @@ def main() -> int:
         except GistError as e:
             log.error("standing queue update failed: %s", e)
 
-    try:
-        gist.write(files)
-    except GistError as e:
-        print(f"gist write failed: {e}", file=sys.stderr)
-        return 1
-
     # ---- pushes: STRONG and HEAVY only (WATCH stays in the pack) -----------
+    # Dedup: the book rebuilds every poll now, so an undeduped STRONG would
+    # page every 15 minutes. A key pushes when its grade ESCALATES; the same
+    # grade re-pushes at most every consensus_repush_hours.
+    pushed = st.setdefault("pushed_consensus", {})
+    rank = {"WATCH": 0, "STRONG": 1, "HEAVY": 2}
+    repush = timedelta(hours=float(cfg(t, "consensus_repush_hours")))
     for c in consensus:
         if c["grade"] == "WATCH" or not topic:
             continue
+        key = f"{c['condition_id']}|{c['side']}"
+        prior = pushed.get(key) or {}
+        escalated = rank[c["grade"]] > rank.get(prior.get("grade"), -1)
+        recent = False
+        try:
+            recent = (now_utc() - datetime.fromisoformat(prior["at"])) < repush
+        except (KeyError, TypeError, ValueError):
+            pass
+        if not escalated and recent:
+            continue
+        pushed[key] = {"grade": c["grade"], "at": now_iso}
         adders = "\n".join(
             f"- {a['alias']}: ${a['before']:,.0f} -> ${a['after']:,.0f} "
             f"(+${a['added_usd']:,.0f})" for a in c["adders"][:6])
@@ -293,6 +342,13 @@ def main() -> int:
                                 "Tags": "whale"}, timeout=20)
         except httpx.HTTPError as e:
             log.error("ntfy failed: %s", e)
+
+    files[STATE_FILE] = json.dumps(st, indent=1)
+    try:
+        gist.write(files)
+    except GistError as e:
+        print(f"gist write failed: {e}", file=sys.stderr)
+        return 1
 
     print(f"whale-book: {len(books)} wallets, {len(consensus)} consensus rows "
           f"({sum(1 for c in consensus if c['grade'] != 'WATCH')} pushed)")

@@ -164,6 +164,60 @@ def attach_context(feed_items: list, race_tag: str, within_hours: int = 2) -> tu
             "by hand; the pipeline cannot read them.", [])
 
 
+def whale_book_problems(book, roster, snapshot_age_min, now=None) -> list[str]:
+    """Heartbeat checks for whale-book.json vs whales.yaml and brief-pack age.
+
+    Three live failures motivated this: a book generated 17h behind brief-pack,
+    a roster that disagreed with whales.yaml (missing exactly the two wallets
+    that had moved), and consensus:[] being indistinguishable from "the job
+    never ran".
+    """
+    problems = []
+    if not book:
+        return ["whale-book.json is missing from the gist"]
+    if not book.get("status"):
+        problems.append("whale-book has no status field (old-format or carried file)")
+
+    age = snap_mod.age_minutes({"generated_at": book.get("computed_at")
+                                or book.get("generated_at")}, now)
+    if age is None:
+        problems.append("whale-book has no readable computed_at")
+    elif snapshot_age_min is not None and age - snapshot_age_min > 45:
+        problems.append(
+            f"whale-book is {age - snapshot_age_min:.0f} min older than the snapshot "
+            f"(book {age:.0f}m vs snapshot {snapshot_age_min:.0f}m) -- it must "
+            f"regenerate every poll")
+
+    want = sorted((w.get("alias") or "?") for w in roster or []
+                  if w.get("active", True))
+    got = sorted(book.get("roster_aliases") or [])
+    if want and got != want:
+        missing = set(want) - set(got)
+        extra = set(got) - set(want)
+        problems.append(
+            "whale-book roster disagrees with whales.yaml"
+            + (f" -- missing {sorted(missing)}" if missing else "")
+            + (f" -- extra {sorted(extra)}" if extra else ""))
+    return problems
+
+
+def derived_total_cost(ledger: list):
+    """Open cost basis summed from the ledger rows at publish time.
+
+    The stored bankroll figure went stale the first time a position was added
+    ($554.78 on file vs $634.78 actual after Holscher) -- so it is DERIVED on
+    every publish and never trusted from storage.
+    """
+    total = Decimal("0")
+    for p in ledger or []:
+        c = p.get("cost_dollars_fee_incl")
+        if c is not None:
+            total += D(c)
+        elif p.get("shares") and p.get("avg_price_cents"):
+            total += D(p["shares"]) * D(p["avg_price_cents"]) / 100
+    return total.quantize(Decimal("0.01"))
+
+
 def run(args) -> int:
     started = now_utc()
     errors: list[str] = []
@@ -559,8 +613,14 @@ def run(args) -> int:
         positions={"ledger": ledger, "marked_pnl": marked, "pnl_price_basis": basis,
                    "orphans": orphans,
                    "clusters": ledger_doc.get("clusters") if isinstance(ledger_doc, dict) else None,
-                   "bankroll": (ledger_doc.get("bankroll_snapshot_2026_07_28")
-                                if isinstance(ledger_doc, dict) else None)},
+                   "bankroll": (lambda b: ({**b,
+                        "total_cost_deployed": str(derived_total_cost(ledger)),
+                        "deployable_vs_target": str((D(str(b.get("target_bankroll_usd", 1000)))
+                                                     - derived_total_cost(ledger)).quantize(Decimal("0.01"))),
+                        "_total_cost_note": "derived from ledger rows at publish; never stored"}
+                        if isinstance(b, dict) else b))(
+                       ledger_doc.get("bankroll_snapshot_2026_07_28")
+                       if isinstance(ledger_doc, dict) else None)},
         cross_venue=cross_venue,
         whales=whales_out,
         feeds_36h=feed_items,
@@ -692,6 +752,14 @@ def selftest(args) -> int:
                 degraded.extend(soft)
     except GistError as e:
         problems.append(f"gist unreachable: {e}")
+
+    try:
+        wb = gist.read_json("whale-book.json")
+        roster = gist.read_yaml("whales.yaml", []) or []
+        snap_age = snap_mod.age_minutes(snap) if snap else None
+        problems.extend(whale_book_problems(wb, roster, snap_age))
+    except GistError as e:
+        problems.append(f"whale-book check failed: {e}")
 
     try:
         kalshi_mod.KalshiPoller(http)._get("/exchange/status")

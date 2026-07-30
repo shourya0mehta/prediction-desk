@@ -64,6 +64,19 @@ jobs:
           fi
           echo "flag=$FLAG" >> "$GITHUB_OUTPUT"
 
+      # Whale book runs EVERY poll and BEFORE the poll step, so the mirror the
+      # poll builds always carries a book from the same cycle as brief-pack --
+      # the daily-gated version drifted 17h behind and disagreed on the roster.
+      # continue-on-error: a data-api outage must not stop the poll publishing;
+      # the heartbeat flags a stale book instead.
+      - name: Whale book
+        continue-on-error: true
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python tools/whale_book.py
+
       - name: Poll
         env:
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
@@ -94,14 +107,6 @@ jobs:
           PAGES_PREFIX: ${{ secrets.PAGES_PREFIX }}
           FEC_API_KEY: ${{ secrets.FEC_API_KEY }}
         run: python tools/scout.py --emit-site ./site
-
-      - name: Whale book
-        if: steps.scout.outputs.run == 'yes'
-        env:
-          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
-          GIST_ID: ${{ secrets.GIST_ID }}
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-        run: python tools/whale_book.py
 
       # Carry yesterday's scout pack forward on the ~47 runs a day that do not
       # rebuild it, or Pages would 404 the file for the analyst -- the same trap
