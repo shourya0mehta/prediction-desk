@@ -240,7 +240,8 @@ def run(args) -> int:
         derived = [] if args.election_night else feeds_mod.derive_feeds(active)
         all_feeds = list(feeds_cfg) + derived
         log.info("feeds: %d static + %d derived", len(feeds_cfg), len(derived))
-        feed_items, feed_errors = feeds_mod.collect(http, all_feeds, race_keyword_map(watchlist))
+        feed_items, feed_errors = feeds_mod.collect(http, all_feeds,
+                                            feeds_mod.build_race_matchers(watchlist))
         errors.extend(feed_errors)
 
     # ---- markets --------------------------------------------------------
@@ -530,17 +531,15 @@ def run(args) -> int:
         # matches any title containing "mi". On a live 1,777-market sweep that
         # produced 114 false listings, including a Peruvian presidency market
         # filed under the Wisconsin governor's race.
-        kwmap = race_keyword_map(active)
+        # Same matcher as the feed tagger: full name, race identifier, two
+        # same-race names, or surname+context -- never a bare surname. The old
+        # word-boundary scan tagged "Jerome Powell" listings into WA-05.
+        matchers = feeds_mod.build_race_matchers(active)
         if known:
             for r in universe:
                 if r["id"] in known:
                     continue
-                blob = (r.get("title") or "").lower()
-                hit = None
-                for tag, words in kwmap.items():
-                    if any(re.search(rf"\b{re.escape(w.lower())}\b", blob) for w in words):
-                        hit = tag
-                        break
+                hit = feeds_mod.tag_for(r.get("title") or "", matchers)
                 if hit and not args.selftest:
                     engine.emit(alert_mod.new_listing_alert(r, hit))
         state["seen_market_ids"] = [r["id"] for r in universe]

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -158,13 +159,129 @@ def fetch_feed(client: httpx.Client, url: str, retries: int = MAX_RETRIES) -> tu
     return [], last_err or "exhausted retries"
 
 
-def tag_for(text: str, race_keywords: dict[str, list[str]]) -> str | None:
+# Famous-name collisions: if one of these FULL names appears in an item, the
+# matching surname is suppressed for that item. Grown from live false
+# positives -- "Jerome Powell leaving the Federal Reserve Board" tagged the
+# WA-05 race on the bare surname "Powell", and "Jo Stevens, British MP" tagged
+# the Michigan Senate primary.
+FAMOUS_COLLISIONS = {
+    "powell": ("jerome powell", "colin powell", "sidney powell", "jesse powell",
+               "powell doctrine", "powell memo"),
+    "stevens": ("jo stevens", "sufjan stevens", "cat stevens", "ted stevens",
+                "john paul stevens", "stevens institute", "stevens point"),
+    "james": ("lebron james", "james webb", "etta james", "rick james",
+              "james brown", "james bond"),
+    "kelly": ("megyn kelly", "r. kelly", "kelly clarkson", "mark kelly"),
+    "smith": ("adam smith economist",),
+    "jackson": ("michael jackson", "andrew jackson", "jackson hole",
+                "ketanji brown jackson", "jesse jackson"),
+    "collins": ("phil collins", "judy collins"),
+    "gray": ("freddie gray", "gray zone", "dorian gray"),
+    "hong": ("hong kong",),
+}
+
+_IDENTIFIER_RE = re.compile(
+    r"\b[A-Z]{2}-(\d{2}|Sen|Gov)\b"                       # MO-04, MI-Sen, KS-Gov
+    r"|\b(washington|michigan|missouri|wisconsin|minnesota|maine|kansas|"
+    r"massachusetts|vermont|connecticut)\b.*"
+    r"\b(senate|governor|house|district|\d+(st|nd|rd|th))\b", re.I)
+
+
+def _word_hit(needle: str, low_text: str) -> bool:
+    return re.search(rf"\b{re.escape(needle.lower())}\b", low_text) is not None
+
+
+def build_race_matchers(watchlist: list) -> dict[str, dict]:
+    """Per-race matcher structures for tag_for.
+
+    names       full candidate names (watchlist `candidates` + `candidate`)
+    surnames    their last tokens (suffix-stripped, >3 chars)
+    identifiers race-specific keywords (an explicit race id, or state+office)
+                -- sufficient ALONE to tag
+    context     everything else in `keywords` (places, allied names) --
+                supports a surname but never tags alone
+    """
+    suffixes = {"jr", "sr", "ii", "iii", "iv", "3rd", "2nd", "(dem)", "(gop)"}
+    out: dict[str, dict] = {}
+    for row in watchlist or []:
+        tag = row.get("race_tag")
+        if not tag:
+            continue
+        m = out.setdefault(tag, {"names": set(), "surnames": set(),
+                                 "identifiers": set(), "context": set()})
+        for n in list(row.get("candidates") or []) + [row.get("candidate")]:
+            if not n:
+                continue
+            n = re.sub(r"\s*\(.*?\)\s*", " ", str(n)).strip()
+            if len(n) < 4:
+                continue
+            m["names"].add(n.lower())
+            parts = [p for p in n.lower().split() if p.strip(".") not in suffixes]
+            if len(parts) >= 2 and len(parts[-1]) > 3:
+                m["surnames"].add(parts[-1])
+        for w in row.get("keywords") or []:
+            w = str(w).strip()
+            if len(w) < 4:
+                continue
+            if _IDENTIFIER_RE.search(w):
+                m["identifiers"].add(w.lower())
+            else:
+                m["context"].add(w.lower())
+    for m in out.values():
+        # A keyword that merely repeats a candidate's surname ("Stevens" in the
+        # MI-Sen keywords) must not double as context, or a bare surname becomes
+        # its own supporting evidence and tags alone anyway.
+        m["context"] -= m["surnames"]
+        m["context"] -= m["names"]
+    return {k: v for k, v in out.items() if v["names"] or v["identifiers"]}
+
+
+def tag_for(text: str, matchers: dict) -> str | None:
+    """Best race tag for an item, or None.
+
+    A race matches when the item carries:
+      * a candidate's FULL name, or
+      * a race identifier ("MO-04", "Michigan Senate"), or
+      * two distinct candidate names of the same race (any form), or
+      * one surname PLUS a same-item context token.
+    A bare surname never tags on its own -- that is exactly how Jerome Powell
+    became a WA-05 item -- and a famous-name collision suppresses the surname
+    even when context is present.
+    """
     low = (text or "").lower()
-    best, best_hits = None, 0
-    for tag, words in race_keywords.items():
-        hits = sum(1 for w in words if w.lower() in low)
-        if hits > best_hits:
-            best, best_hits = tag, hits
+    if not low:
+        return None
+
+    # Backward compat: accept the old {tag: [words]} shape from older tests.
+    if matchers and isinstance(next(iter(matchers.values())), (list, tuple)):
+        matchers = build_race_matchers(
+            [{"race_tag": t, "candidates": [], "keywords": list(ws)}
+             for t, ws in matchers.items()])
+
+    best, best_score = None, 0
+    for tag, m in matchers.items():
+        score = 0
+        full_hits = {n for n in m["names"] if n in low}
+        id_hits = {i for i in m["identifiers"] if _word_hit(i, low)}
+        surname_hits = set()
+        for sn in m["surnames"]:
+            if not _word_hit(sn, low):
+                continue
+            famous = FAMOUS_COLLISIONS.get(sn, ())
+            if any(f in low for f in famous):
+                continue                      # collision: suppress this surname
+            surname_hits.add(sn)
+        ctx_hits = {c for c in m["context"] if c in low}
+
+        name_hits = len(full_hits) + len(
+            {s for s in surname_hits if not any(s in f for f in full_hits)})
+        qualifies = (bool(full_hits) or bool(id_hits) or name_hits >= 2
+                     or (bool(surname_hits) and bool(ctx_hits)))
+        if not qualifies:
+            continue
+        score = 2 * len(full_hits) + 2 * len(id_hits) + len(surname_hits) + len(ctx_hits)
+        if score > best_score:
+            best, best_score = tag, score
     return best
 
 

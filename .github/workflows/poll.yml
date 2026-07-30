@@ -9,9 +9,15 @@ name: poll
 #   * a GitHub Pages mirror -- the READ path, because the analyst's scheduled-task
 #     sandbox cannot reach gist.githubusercontent.com at all, and its fallback
 #     route truncates large files mid-document.
+# CADENCE EXPERIMENT (2026-07-30, owner-approved): */15 instead of */30.
+# Measured under */30, GitHub load-shedding delivered 80-203 min between
+# scheduled runs (median 140) with whole multi-hour windows dropped. Doubling
+# the slots should tighten the edges of those windows; it will not fix the
+# windows themselves. Evaluate after a few days by re-running the A9 interval
+# analysis; revert if the median does not improve.
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       universe:
@@ -53,7 +59,7 @@ jobs:
           HOUR_UTC=$(date -u +%H); MIN_UTC=$(date -u +%M)
           FLAG=""
           if [ "${{ github.event.inputs.universe }}" = "true" ]; then FLAG="--universe"; fi
-          if { [ "$HOUR_UTC" = "14" ] || [ "$HOUR_UTC" = "00" ]; } && [ "$MIN_UTC" -lt 30 ]; then
+          if { [ "$HOUR_UTC" = "14" ] || [ "$HOUR_UTC" = "00" ]; } && [ "$MIN_UTC" -lt 15 ]; then
             FLAG="--universe"
           fi
           echo "flag=$FLAG" >> "$GITHUB_OUTPUT"
@@ -76,7 +82,7 @@ jobs:
           HOUR_UTC=$(date -u +%H); MIN_UTC=$(date -u +%M)
           RUN=""
           if [ "${{ github.event.inputs.scout }}" = "true" ]; then RUN="yes"; fi
-          if [ "$HOUR_UTC" = "12" ] && [ "$MIN_UTC" -lt 30 ]; then RUN="yes"; fi
+          if [ "$HOUR_UTC" = "12" ] && [ "$MIN_UTC" -lt 15 ]; then RUN="yes"; fi
           echo "run=$RUN" >> "$GITHUB_OUTPUT"
 
       - name: Scout sweep

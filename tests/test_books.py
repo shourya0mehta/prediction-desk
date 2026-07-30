@@ -416,14 +416,20 @@ def test_derive_feeds_one_per_active_race_pretagged():
     assert feeds[0]["source"] == "gnews-mi-sen-dem"
 
 
-def test_derived_feed_tag_is_a_fallback_and_never_overrides_keywords():
-    """Keyword tagging is unchanged; the feed's own tag only fills the gap."""
-    from desk.pollers.feeds import tag_for
-    kw = {"mi-sen-dem": ["El-Sayed"], "wa-05": ["Conroy"]}
-    # Keyword wins when present.
-    assert tag_for("Conroy leads the WA field", kw) == "wa-05"
-    # Nothing matches -> caller falls back to the feed's race_tag.
-    assert tag_for("A story naming nobody", kw) is None
+def test_derived_feed_tag_is_a_fallback_and_never_overrides_matches():
+    """Matcher tagging wins when it fires; the feed's own tag fills the gap.
+
+    Updated for the round-8 matcher: a bare surname keyword no longer tags on
+    its own (that behavior produced the Jerome Powell false positive), so the
+    positive case here uses a full candidate name.
+    """
+    from desk.pollers.feeds import build_race_matchers, tag_for
+    m = build_race_matchers([
+        {"race_tag": "wa-05", "candidates": ["Carmela Conroy"], "keywords": ["WA-05"]},
+        {"race_tag": "mi-sen-dem", "candidates": ["Abdul El-Sayed"], "keywords": ["MI-Sen"]},
+    ])
+    assert tag_for("Carmela Conroy leads the WA field", m) == "wa-05"
+    assert tag_for("A story naming nobody", m) is None
 
 
 def test_fetch_feed_backs_off_on_429_then_succeeds():
@@ -1448,3 +1454,61 @@ def test_heavy_fires_on_three_alerting_or_both_cores_plus_third():
 def test_single_wallet_never_grades():
     from tools.whale_book import grade
     assert grade(_adds(("Domer", 500000)), {}, CORES, ALERTING) is None
+
+
+# ==================================== round 8: tagger false positives (live)
+
+def _r8_matchers():
+    from desk.pollers.feeds import build_race_matchers
+    return build_race_matchers([
+        {"race_tag": "wa-05",
+         "candidates": ["Nate Powell", "Carmela Conroy", "Michael Baumgartner"],
+         "keywords": ["WA-05", "Washington 5th", "Baumgartner", "Conroy", "Powell", "Spokane"]},
+        {"race_tag": "mi-sen-dem",
+         "candidates": ["Abdul El-Sayed", "Haley Stevens"],
+         "keywords": ["El-Sayed", "Stevens", "McMorrow", "Michigan Senate", "MI-Sen"]},
+        {"race_tag": "mo-04",
+         "candidates": ["Hartzell Gray", "Jordan Herrera", "Randy Miller"],
+         "keywords": ["MO-04", "Missouri 4th", "Hartzell Gray", "Herrera", "Randy Miller", "Kansas City"]},
+        {"race_tag": "ks-gov-dem",
+         "candidates": ["Cindy Holscher", "Ethan Corson", "Curt Skoog"],
+         "keywords": ["Holscher", "Corson", "Skoog", "Kansas Governor", "KS-Gov", "Laura Kelly"]},
+    ])
+
+
+def test_tonights_three_false_positives_no_longer_tag():
+    """The exact three items from the 2026-07-29 overnight run."""
+    from desk.pollers.feeds import tag_for
+    m = _r8_matchers()
+    assert tag_for("Jerome Powell leaving the Federal Reserve Board", m) is None
+    assert tag_for("Jo Stevens, British MP, on the Senedd elections", m) is None
+    # The KC Star piece about the KANSAS governor's race must not tag MO-04 off
+    # the paper's own name -- and SHOULD tag the Kansas race via its identifier.
+    kc = ("Kansas governor hopefuls spar over school funding | Kansas City Star "
+          "coverage of the Kansas Governor primary")
+    assert tag_for(kc, m) == "ks-gov-dem"
+
+
+def test_famous_collision_suppressed_even_with_context_present():
+    """Belt over braces: Spokane + Jerome Powell is still not a WA-05 item."""
+    from desk.pollers.feeds import tag_for
+    assert tag_for("Spokane businesses react to Jerome Powell rate decision",
+                   _r8_matchers()) is None
+
+
+def test_true_positives_survive_the_tightening():
+    from desk.pollers.feeds import tag_for
+    m = _r8_matchers()
+    assert tag_for("Nate Powell draws $1.13M in outside money", m) == "wa-05"       # full name
+    assert tag_for("Powell surges in the WA-05 top-two race", m) == "wa-05"          # surname+identifier
+    assert tag_for("Powell and Conroy trade barbs before the primary", m) == "wa-05" # two same-race names
+    assert tag_for("Stevens attacks El-Sayed in Michigan Senate debate", m) == "mi-sen-dem"
+    assert tag_for("Hartzell Gray leads a fragmented MO-04 field", m) == "mo-04"
+
+
+def test_bare_surname_alone_never_tags():
+    from desk.pollers.feeds import tag_for
+    m = _r8_matchers()
+    assert tag_for("Powell to speak at a conference", m) is None
+    assert tag_for("Stevens wins award", m) is None
+    assert tag_for("Kansas City weather: hot week ahead", m) is None    # context alone
